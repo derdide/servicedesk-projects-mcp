@@ -1,0 +1,37 @@
+{
+  "name": "servicedesk-projects-mcp",
+  "version": "0.4.0",
+  "description": "MCP server for ManageEngine ServiceDesk Plus Cloud projects: milestones, tasks, comments and task dependencies",
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node18 --outfile=dist/server.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "typecheck": "tsc -p .",
+    "pretest": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "servicedesk-plus",
+    "manageengine",
+    "claude",
+    "project-management"
+  ],
+  "author": "Dietmar D.",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/derdide/servicedesk-projects-mcp.git"
+  }
+}
