@@ -7,7 +7,7 @@ import { RefreshTokenProvider } from "./auth.js";
 import { SdpClient } from "./sdp.js";
 import { registerTools } from "./tools.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 const INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
 - Writes are only allowed on projects configured in SDP_WRITE_PROJECT_IDS; changes are attributed to the account whose token the server uses.

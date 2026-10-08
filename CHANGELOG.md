@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 — 2026-10-08
+- Removed `sdp_get_task_field_options`: the metadata endpoint needs a broader OAuth scope than the projects scopes this server asks for.
+- Task dependencies verified against a live instance (create and list); README status updated.
+
 ## 0.4.0 — 2026-10-07
 - First public release. All organisation-specific defaults removed: `SDP_BASE_URL` and `SDP_PORTAL` are now required; `ZOHO_ACCOUNTS_URL` defaults to the US data centre, `SDP_TIMEZONE` to UTC, `SDP_DEFAULT_TASK_TEMPLATE` to "Default Task".
 - `stream` is opt-in: set `SDP_STREAM_FIELD` to the `udf_*` field to expose.

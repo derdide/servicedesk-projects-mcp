@@ -39200,32 +39200,6 @@ function registerTools(server, sdp, cfg) {
     }
   );
   server.registerTool(
-    "sdp_get_task_field_options",
-    {
-      title: "Get task field options",
-      description: "Allowed values of a task picklist field: the stream field configured in SDP_STREAM_FIELD (default), status, priority, or any udf_* field. Use before setting stream on tasks.",
-      inputSchema: { field: external_exports.string().default("stream").describe('"stream", "status", "priority", or a udf_* API name') },
-      annotations: RO
-    },
-    async ({ field }) => {
-      try {
-        const f = field === "stream" ? cfg.streamField : field;
-        if (!f) throw new Error("stream is not configured: set SDP_STREAM_FIELD or pass a udf_* field name.");
-        if (f.startsWith("udf_")) {
-          const meta3 = await sdp.get("/tasks/_metainfo");
-          const def = meta3.metainfo?.fields?.udf_fields?.fields?.[f];
-          if (!def) throw new Error(`Custom field ${f} not found on tasks`);
-          const res2 = await sdp.get(`/tasks/udf_fields/${def.id}/allowed_values`).catch(async () => sdp.get(`/tasks/udf_fields/${def.id}`));
-          return ok({ field: f, name: def.display_name, default: def.default_value, raw: res2 });
-        }
-        const res = await sdp.get(`/tasks/_metainfo/fields/${f}/allowed_values`).catch(async () => sdp.get(`/tasks/${f}`));
-        return ok({ field: f, raw: res });
-      } catch (e) {
-        return fail(e);
-      }
-    }
-  );
-  server.registerTool(
     "sdp_list_comments",
     {
       title: "List comments",
@@ -39559,7 +39533,7 @@ function commentTarget(projectId, milestoneId, taskId) {
 }
 
 // src/server.ts
-var VERSION = "0.4.0";
+var VERSION = "0.4.1";
 var INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
 - Writes are only allowed on projects configured in SDP_WRITE_PROJECT_IDS; changes are attributed to the account whose token the server uses.
 - Dates are YYYY-MM-DD in the configured timezone (SDP_TIMEZONE, default UTC).

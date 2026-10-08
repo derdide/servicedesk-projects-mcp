@@ -310,35 +310,6 @@ export function registerTools(server: McpServer, sdp: SdpClient, cfg: Config): v
   );
 
   server.registerTool(
-    "sdp_get_task_field_options",
-    {
-      title: "Get task field options",
-      description:
-        "Allowed values of a task picklist field: the stream field configured in SDP_STREAM_FIELD (default), status, priority, or any udf_* field. " +
-        "Use before setting stream on tasks.",
-      inputSchema: { field: z.string().default("stream").describe('"stream", "status", "priority", or a udf_* API name') },
-      annotations: RO,
-    },
-    async ({ field }) => {
-      try {
-        const f = field === "stream" ? cfg.streamField : field;
-        if (!f) throw new Error("stream is not configured: set SDP_STREAM_FIELD or pass a udf_* field name.");
-        if (f.startsWith("udf_")) {
-          const meta = await sdp.get("/tasks/_metainfo");
-          const def = (meta as Json).metainfo?.fields?.udf_fields?.fields?.[f];
-          if (!def) throw new Error(`Custom field ${f} not found on tasks`);
-          const res = await sdp.get(`/tasks/udf_fields/${def.id}/allowed_values`).catch(async () => sdp.get(`/tasks/udf_fields/${def.id}`));
-          return ok({ field: f, name: def.display_name, default: def.default_value, raw: res });
-        }
-        const res = await sdp.get(`/tasks/_metainfo/fields/${f}/allowed_values`).catch(async () => sdp.get(`/tasks/${f}`));
-        return ok({ field: f, raw: res });
-      } catch (e) {
-        return fail(e);
-      }
-    },
-  );
-
-  server.registerTool(
     "sdp_list_comments",
     {
       title: "List comments",

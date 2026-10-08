@@ -43,7 +43,7 @@ let passed = 0;
 const check = (cond, label) => { assert.ok(cond, label); passed++; console.log("ok -", label); };
 
 try {
-  check(tools.length === 16 && tools.includes("sdp_add_dependency"), `16 tools registered (${tools.length})`);
+  check(tools.length === 15 && tools.includes("sdp_add_dependency"), `15 tools registered (${tools.length})`);
 
   const ms = await call("sdp_list_milestones", { project_id: P });
   check(!ms.err && JSON.parse(ms.text)[0].scheduled_end.startsWith("2026-12-31"), "milestones listed after 401 + token refresh");

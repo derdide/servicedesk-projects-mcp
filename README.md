@@ -15,7 +15,6 @@ ServiceDesk Plus Cloud has its own MCP connector, but in our use (autumn 2026) i
 | `sdp_list_milestones` | read | Milestones of a project, in order |
 | `sdp_list_tasks`, `sdp_get_task` | read | Tasks, optionally per milestone |
 | `sdp_list_comments` | read | Comments on a project, milestone or task |
-| `sdp_get_task_field_options` | read | Allowed values of a task picklist (status, priority, custom fields) |
 | `sdp_list_dependencies` | read | Task dependencies (predecessor → successor) |
 | `sdp_create_milestone`, `sdp_update_milestone` | write | |
 | `sdp_create_task`, `sdp_update_task` | write | Update can also post a comment explaining the change |
@@ -129,7 +128,7 @@ Quit Claude Desktop completely (tray / menu bar) and start it again.
 | `SDP_AUDIT_LOG` | | none | Path of a JSON-lines file receiving one line per write |
 | `SDP_TIMEZONE` | | `UTC` | IANA timezone for dates, e.g. `Europe/Zurich` |
 | `SDP_DEFAULT_TASK_TEMPLATE` | | `Default Task` | Task template used when creating tasks. A task's template cannot be changed after creation |
-| `SDP_STREAM_FIELD` | | none | A task custom field (`udf_*`) exposed as `stream`, e.g. a workstream picklist |
+| `SDP_STREAM_FIELD` | | none | A task custom field (`udf_*`) exposed as `stream`, e.g. a workstream picklist. Values must match the picklist exactly; existing values are visible on the tasks |
 | `SDP_ENV_FILE` | | | Explicit path of the `.env` file |
 | `MCP_TRANSPORT` | | `stdio` | `http` for container hosting (see below) |
 | `PORT` | | `8080` | HTTP port when `MCP_TRANSPORT=http` |
@@ -138,12 +137,9 @@ The `.env` file is looked up next to `server.mjs` and one folder above it. Real 
 
 ## Status and known limits
 
-Tested against a live ServiceDesk Plus Cloud instance (EU data centre, custom domain): reading projects, milestones, tasks and members; creating tasks under a milestone; owner resolution by email; comments; token refresh.
+Tested against a live ServiceDesk Plus Cloud instance (EU data centre, custom domain): reading projects, milestones, tasks and members; creating and updating tasks under a milestone and at project level; owner resolution by email; a custom field exposed as `stream`; comments; task dependencies (creating and listing); token refresh.
 
-Not yet verified against a live instance:
-
-- **Task dependencies.** ServiceDesk Plus Cloud documents dependencies for request tasks but not for project tasks. The project-task endpoint (`/projects/{id}/task_dependencies`, `parent_task` / `child_task`) is modelled on the request-task API. If your instance rejects it, please open an issue with the error message.
-- **`sdp_get_task_field_options`** for custom fields: the endpoint for allowed values is not clearly documented; the tool returns the raw answer.
+Note on dependencies: ServiceDesk Plus Cloud documents dependencies for request tasks only. The project-task endpoint used here (`/projects/{id}/task_dependencies`, `parent_task` / `child_task`) follows the same pattern and works, but is not in the official API reference, so it could change without notice.
 
 Other limits: no delete (by design); a task cannot be moved between milestones through the API; the HTTP mode is single-user (see below).
 
