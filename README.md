@@ -40,7 +40,7 @@ Two ways to run it:
 
 - ServiceDesk Plus **Cloud** (the on-premise edition has a different API and is not supported).
 - A ServiceDesk account with access to the projects you want to manage (project member or admin).
-- Node.js 18 or later (`node -v`).
+- Node.js 20 or later (`node -v`).
 - An MCP client. Instructions below are for **Claude Desktop**; any client that launches stdio servers works.
 
 ## Installation — single user, local (Claude Desktop)
@@ -131,7 +131,7 @@ Quit Claude Desktop completely (tray / menu bar) and start it again.
 | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN` | yes | — | Self Client credentials (step 3) |
 | `SDP_WRITE_PROJECT_IDS` | | empty (read-only) | Comma-separated project ids where writes are allowed, or `*` |
 | `SDP_AUDIT_LOG` | | none | Path of a JSON-lines file receiving one line per write |
-| `SDP_TIMEZONE` | | `UTC` | IANA timezone for dates, e.g. `Europe/Zurich` |
+| `SDP_TIMEZONE` | | `UTC` | IANA timezone for dates, e.g. `Europe/Zurich`; checked at startup. **One time zone for all users** (see *Known limits*) |
 | `SDP_DEFAULT_TASK_TEMPLATE` | | `Default Task` | Task template used when creating tasks. A task's template cannot be changed after creation |
 | `SDP_STREAM_FIELD` | | none | A task custom field (`udf_*`) exposed as `stream`, e.g. a workstream picklist. Values must match the picklist exactly; existing values are visible on the tasks |
 | `SDP_ENV_FILE` | | | Explicit path of the `.env` file |
@@ -163,7 +163,8 @@ The `.env` file is looked up next to `server.mjs` and one folder above it. Real 
 **The guard-rails protect against the AI, not against the user or the AI client.**
 
 - In multi-user mode each AI client (Claude, Copilot, Copilot Studio) holds the user's own Zoho token and passes it through this server to ServiceDesk ("token passthrough"). That token can do in ServiceDesk what the user can do, within the Zoho scopes granted — no more, but also without this server's guard-rails if used directly. The real boundaries are therefore **the user's ServiceDesk permissions and the Zoho scopes** (no `DELETE` scope). This is a deliberate trade-off: the alternative — the server issuing its own tokens and keeping Zoho tokens server-side — would make it a token store. It deviates from the MCP authorization specification, which asks servers to accept only tokens issued for them.
-- What the server adds on top: numeric-only ids (no path tricks), a check that an updated task or milestone belongs to the named project, no delete operations, dry runs for bulk creation (50 tasks per call), strict dates, and an audit line for every write attempt — with the user's e-mail, the outcome, and the previous values of changed fields.
+- **Who gets in is decided on `/mcp`, not by the OAuth facade.** The facade only shapes the sign-in request (it forwards a fixed set of parameters for your own Zoho client and adds `access_type=offline`); anyone with a Zoho account could complete a sign-in. Access is granted when the token's e-mail matches `ALLOWED_EMAIL_DOMAINS` / `ALLOWED_USERS`, and limited by that user's ServiceDesk permissions.
+- What the server adds on top: numeric-only ids (no path tricks), a check that an updated task or milestone belongs to the named project (refused if ServiceDesk does not confirm it), no delete operations, dry runs for bulk creation (50 tasks per call), strict dates, and an audit line for every write attempt — with the user's e-mail, the outcome, and the previous values of changed fields.
 - **Prompt injection.** Task titles, descriptions and comments are written by many people and are passed to the AI as data. A crafted text can try to make the AI change other tasks or post comments. Mitigations: updates are flagged *destructive* so clients that honour MCP annotations ask before running them; configure your clients to require approval for write tools; review dry runs before confirming. `SDP_WRITE_PROJECT_IDS` can additionally limit writes to named projects; with `*`, any project the user can write in ServiceDesk is reachable.
 - **Single-user mode** keeps a long-lived refresh token in `.env` in plain text: protect the file like a password.
 
@@ -173,7 +174,7 @@ Tested against a live ServiceDesk Plus Cloud instance (EU data centre, custom do
 
 Note on dependencies: ServiceDesk Plus Cloud documents dependencies for request tasks only. The project-task endpoint used here (`/projects/{id}/task_dependencies`, `parent_task` / `child_task`) follows the same pattern and works, but is not in the official API reference, so it could change without notice.
 
-Other limits: no delete (by design); a task cannot be moved between milestones through the API; a bulk creation interrupted by a disconnect stops cleanly but is not resumed — the result lists what was created, and re-running it creates the remaining tasks again *and* duplicates of the created ones, so check before re-running. The multi-user mode keeps its token cache and rate limits in memory: run **one replica**, or put a gateway in front for more.
+Other limits: no delete (by design); **one time zone for everyone** — dates given as `YYYY-MM-DD` (or without offset) are read in `SDP_TIMEZONE`, so a user in another time zone may see a deadline land a few hours off, at worst on the neighbouring day near midnight; creating a task with a milestone or task id is not cross-checked against the project (ServiceDesk permissions still apply); a task cannot be moved between milestones through the API; a bulk creation interrupted by a disconnect stops cleanly but is not resumed — the result lists what was created, and re-running it creates the remaining tasks again *and* duplicates of the created ones, so check before re-running. The multi-user mode keeps its token cache and rate limits in memory: run **one replica**, or put a gateway in front for more.
 
 The multi-user OAuth flow was verified against Zoho (EU) with the [check script](docs/zoho-oauth-check.ps1): discovery, PKCE S256 (enforced), refresh tokens with `access_type=offline`, user-info, and ServiceDesk calls with the user's token. The end-to-end connection from Claude, Microsoft 365 Copilot and Copilot Studio is covered by mocks only so far.
 
@@ -200,7 +201,7 @@ The multi-user OAuth flow was verified against Zoho (EU) with the [check script]
 | `/oauth/token` | Pass-through to Zoho's token endpoint |
 | `/healthz` | Liveness |
 
-Guard-rails in this mode: mandatory `ALLOWED_EMAIL_DOMAINS` / `ALLOWED_USERS`, the OAuth facade only accepts your own Zoho client, per-user and per-IP rate limits, one MCP message per request (no JSON-RPC batches, 256 KB), `Host`/`Origin` checks, timeouts, and `SDP_WRITE_PROJECT_IDS` as an optional server-wide brake on top of ServiceDesk permissions. See [Security model](#security-model) for what these do and do not protect against.
+Guard-rails in this mode: mandatory `ALLOWED_EMAIL_DOMAINS` / `ALLOWED_USERS`, the OAuth facade only accepts your own Zoho client and forwards only allow-listed, non-repeated parameters (PKCE, if used, must be S256), per-user rate limits and a per-IP limit for anonymous traffic, POST-only `/mcp` (no SSE streams), one MCP message per request (no JSON-RPC batches, 256 KB), `Host`/`Origin` checks, timeouts, and `SDP_WRITE_PROJECT_IDS` as an optional server-wide brake on top of ServiceDesk permissions. See [Security model](#security-model) for what these do and do not protect against.
 
 Set-up guides:
 

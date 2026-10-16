@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.2 — 2026-10-16
+Fixes from a second independent review (of 0.5.1).
+- **OAuth facade:** repeated parameters refused (a second `client_id` could previously slip past the check); only a fixed set of parameters is forwarded to Zoho; `response_type=code` only; PKCE, if sent, must be S256; `prompt=consent` always.
+- `/mcp` accepts POST only; GET and DELETE answer `405` (no never-ending SSE streams).
+- Zoho outage or 5xx during the token check → `503 Retry-After`, no longer cached as a bad token.
+- Per-IP rate limit counts anonymous traffic only; signed-in users are limited per user (they share Anthropic's or Microsoft's addresses).
+- Updates refused when ServiceDesk does not say which project a task or milestone belongs to (fail closed).
+- `SDP_TIMEZONE` validated at startup.
+- Docs: single time zone for all users documented; security model states that the allow-list on `/mcp`, not the facade, decides access; Node ≥ 20 in README; build target node20.
+
 ## 0.5.1 — 2026-10-16
 Security fixes from an independent review of 0.5.0.
 - **IDs are numeric-only** and URL-encoded; the API client refuses any non-plain path. Path traversal through `task_id`, `milestone_id` or comment targets (which could reach other projects, other modules or other portals) is no longer possible. Updates first read the record and refuse if it belongs to another project.

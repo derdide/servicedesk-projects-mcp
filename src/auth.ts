@@ -82,12 +82,18 @@ export interface UserIdentity {
   name?: string;
 }
 
-/** Resolve a Zoho access token to the signed-in user (Zoho accounts "user info" endpoint). */
+/**
+ * Resolve a Zoho access token to the signed-in user (Zoho accounts "user info" endpoint).
+ * Returns null when Zoho rejects the token (4xx, or no e-mail). Throws when Zoho is
+ * unreachable or failing (network error, timeout, 5xx, 429), so callers do not treat an
+ * outage as a bad token.
+ */
 export async function fetchZohoIdentity(cfg: Config, token: string): Promise<UserIdentity | null> {
   const res = await fetch(`${cfg.zohoAccountsUrl}/oauth/user/info`, {
     headers: { Authorization: `Zoho-oauthtoken ${token}` },
     signal: AbortSignal.timeout(15_000),
   });
+  if (res.status >= 500 || res.status === 429) throw new Error(`Zoho user info: HTTP ${res.status}`);
   if (!res.ok) return null;
   const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   const email = typeof j.Email === "string" ? j.Email : typeof j.email === "string" ? j.email : undefined;

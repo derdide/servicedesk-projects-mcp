@@ -36656,6 +36656,14 @@ function loadConfig() {
   }
   return cfg;
 }
+function timeZone(tz) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+  } catch {
+    throw new Error(`SDP_TIMEZONE: "${tz}" is not a valid IANA time zone (e.g. Europe/Zurich)`);
+  }
+  return tz;
+}
 function buildConfig() {
   const writeRaw = (process.env.SDP_WRITE_PROJECT_IDS ?? "").trim();
   const transport = process.env.MCP_TRANSPORT ?? "stdio";
@@ -36672,7 +36680,7 @@ function buildConfig() {
       writeRaw.split(",").map((s) => s.trim()).filter(Boolean)
     ),
     auditLogPath: process.env.SDP_AUDIT_LOG || void 0,
-    timezone: process.env.SDP_TIMEZONE ?? "UTC",
+    timezone: timeZone(process.env.SDP_TIMEZONE ?? "UTC"),
     transport,
     httpPort: Number(process.env.PORT ?? 8080),
     defaultTaskTemplate: process.env.SDP_DEFAULT_TASK_TEMPLATE ?? "Default Task",
@@ -36754,6 +36762,7 @@ async function fetchZohoIdentity(cfg, token) {
     headers: { Authorization: `Zoho-oauthtoken ${token}` },
     signal: AbortSignal.timeout(15e3)
   });
+  if (res.status >= 500 || res.status === 429) throw new Error(`Zoho user info: HTTP ${res.status}`);
   if (!res.ok) return null;
   const j = await res.json().catch(() => ({}));
   const email3 = typeof j.Email === "string" ? j.Email : typeof j.email === "string" ? j.email : void 0;
@@ -38871,6 +38880,9 @@ var StreamableHTTPServerTransport = class {
 var MAX_OAUTH_BODY = 16 * 1024;
 var MAX_MCP_BODY = 256 * 1024;
 var NEGATIVE_CACHE_MS = 6e4;
+var AUTHORIZE_PARAMS = ["response_type", "client_id", "redirect_uri", "scope", "state", "code_challenge", "code_challenge_method"];
+var ZohoUnavailable = class extends Error {
+};
 function send(res, status, body, headers = {}) {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, {
@@ -38925,13 +38937,25 @@ function createHttpHandler(cfg, makeServer) {
     for (const m of [hits, ipHits]) for (const [k, v] of m) if (now - v.windowStart >= 6e4) m.delete(k);
   }
   setInterval(prune, 6e4).unref();
+  function cached2(token2) {
+    const hit = identityCache.get(tokenKey(token2));
+    return hit && hit.exp > Date.now() ? hit.user : void 0;
+  }
   async function identify(token2) {
-    const key = tokenKey(token2);
-    const hit = identityCache.get(key);
-    if (hit && hit.exp > Date.now()) return hit.user;
-    const user2 = await fetchZohoIdentity(cfg, token2).catch(() => null);
-    identityCache.set(key, { user: user2, exp: Date.now() + (user2 ? cfg.tokenCacheSeconds * 1e3 : NEGATIVE_CACHE_MS) });
+    const hit = cached2(token2);
+    if (hit !== void 0) return hit;
+    let user2;
+    try {
+      user2 = await fetchZohoIdentity(cfg, token2);
+    } catch (e) {
+      throw new ZohoUnavailable(e.message);
+    }
+    identityCache.set(tokenKey(token2), { user: user2, exp: Date.now() + (user2 ? cfg.tokenCacheSeconds * 1e3 : NEGATIVE_CACHE_MS) });
     return user2;
+  }
+  function bearer(req2) {
+    const m = (req2.headers.authorization ?? "").match(/^(?:Bearer|Zoho-oauthtoken)\s+(.+)$/i);
+    return m?.[1].trim() || void 0;
   }
   function allowed(user2) {
     if (cfg.allowedUsers.length && cfg.allowedUsers.includes(user2.email)) return true;
@@ -38960,18 +38984,29 @@ function createHttpHandler(cfg, makeServer) {
     send(res, 401, { error: error62 ?? "unauthorized" }, { "WWW-Authenticate": parts.join(", ") });
   }
   function authorize(url2, res) {
-    if (url2.searchParams.get("client_id") !== cfg.clientId) {
-      return send(res, 400, { error: "invalid_client", error_description: "Unknown client_id" });
+    const q = url2.searchParams;
+    const bad = (error62, error_description) => send(res, 400, { error: error62, error_description });
+    const seen = /* @__PURE__ */ new Set();
+    for (const k of q.keys()) {
+      if (seen.has(k)) return bad("invalid_request", `Parameter ${k} given more than once`);
+      seen.add(k);
     }
+    if (q.get("client_id") !== cfg.clientId) return bad("invalid_client", "Unknown client_id");
+    if (q.get("response_type") !== "code") return bad("unsupported_response_type", "Only response_type=code is supported");
+    if (!q.get("redirect_uri")) return bad("invalid_request", "redirect_uri is required");
+    if (q.has("code_challenge") && q.get("code_challenge_method") !== "S256")
+      return bad("invalid_request", "code_challenge_method must be S256");
+    if (!q.has("code_challenge") && q.has("code_challenge_method"))
+      return bad("invalid_request", "code_challenge_method without code_challenge");
     const out = new URLSearchParams();
-    for (const [k, v] of url2.searchParams) {
-      if (k === "resource") continue;
-      out.set(k, v);
+    for (const k of AUTHORIZE_PARAMS) {
+      const v = q.get(k);
+      if (v !== null) out.set(k, v);
     }
     const requested = (url2.searchParams.get("scope") ?? "").split(/[ ,]+/).filter((s) => s && cfg.zohoScopes.some((z2) => z2.toLowerCase() === s.toLowerCase()));
     out.set("scope", (requested.length ? requested : cfg.zohoScopes).join(","));
     out.set("access_type", "offline");
-    if (!out.has("prompt")) out.set("prompt", "consent");
+    out.set("prompt", "consent");
     res.writeHead(302, { Location: `${zohoAuthorize}?${out.toString()}`, "Cache-Control": "no-store" });
     res.end();
   }
@@ -39015,25 +39050,30 @@ function createHttpHandler(cfg, makeServer) {
     if (req2.headers.host && req2.headers.host !== publicHost) return send(res, 403, { error: "invalid_host" });
     const origin = req2.headers.origin;
     if (origin && !okOrigins.has(origin)) return send(res, 403, { error: "invalid_origin" });
-    const h = req2.headers.authorization ?? "";
-    const m = h.match(/^(?:Bearer|Zoho-oauthtoken)\s+(.+)$/i);
-    if (!m) return unauthorized(res);
-    const tok = m[1].trim();
-    const user2 = await identify(tok);
+    if (req2.method !== "POST") return send(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
+    const tok = bearer(req2);
+    if (!tok) return unauthorized(res);
+    let user2;
+    try {
+      user2 = await identify(tok);
+    } catch (e) {
+      if (!(e instanceof ZohoUnavailable)) throw e;
+      process.stderr.write(`[http] token check unavailable: ${e.message}
+`);
+      return send(res, 503, { error: "temporarily_unavailable", error_description: "Zoho could not be reached to check the sign-in; retry shortly" }, { "Retry-After": "30" });
+    }
     if (!user2) return unauthorized(res, "invalid_token");
     if (!allowed(user2)) return send(res, 403, { error: "forbidden", error_description: `${user2.email} is not allowed to use this server` });
     if (over(hits, user2.email, cfg.rateLimitPerMinute)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
     let parsed;
-    if (req2.method === "POST") {
-      const raw = await readBody(req2, MAX_MCP_BODY);
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return send(res, 400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
-      }
-      if (Array.isArray(parsed)) {
-        return send(res, 400, { jsonrpc: "2.0", error: { code: -32600, message: "Batch requests are not supported" }, id: null });
-      }
+    const raw = await readBody(req2, MAX_MCP_BODY);
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return send(res, 400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
+    }
+    if (Array.isArray(parsed)) {
+      return send(res, 400, { jsonrpc: "2.0", error: { code: -32600, message: "Batch requests are not supported" }, id: null });
     }
     const key = tokenKey(tok);
     const server = makeServer(tok, user2, () => identityCache.delete(key));
@@ -39050,7 +39090,10 @@ function createHttpHandler(cfg, makeServer) {
       const url2 = new URL(req2.url ?? "/", base);
       const p = url2.pathname.replace(/\/+$/, "") || "/";
       if (p === "/healthz") return send(res, 200, "ok");
-      if (over(ipHits, clientIp(req2), cfg.ipRateLimitPerMinute)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
+      const tok = p === "/mcp" ? bearer(req2) : void 0;
+      const signedIn = tok !== void 0 && !!cached2(tok);
+      if (!signedIn && over(ipHits, clientIp(req2), cfg.ipRateLimitPerMinute))
+        return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
       if (req2.method === "GET" && (p === "/.well-known/oauth-protected-resource" || p === "/.well-known/oauth-protected-resource/mcp"))
         return send(res, 200, prm);
       if (req2.method === "GET" && (p.startsWith("/.well-known/oauth-authorization-server") || p.startsWith("/.well-known/openid-configuration")))
@@ -39174,9 +39217,9 @@ var SdpClient = class {
 };
 
 // src/dates.ts
-function tzOffsetMs(utcMs, timeZone) {
+function tzOffsetMs(utcMs, timeZone2) {
   const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+    timeZone: timeZone2,
     hourCycle: "h23",
     year: "numeric",
     month: "2-digit",
@@ -39196,13 +39239,13 @@ function tzOffsetMs(utcMs, timeZone) {
   );
   return asUtc - Math.floor(utcMs / 1e3) * 1e3;
 }
-function wallToEpoch(y, mo, d, h, mi, s, ms, timeZone) {
+function wallToEpoch(y, mo, d, h, mi, s, ms, timeZone2) {
   const guess = Date.UTC(y, mo - 1, d, h, mi, s, ms);
-  let epoch = guess - tzOffsetMs(guess, timeZone);
-  epoch = guess - tzOffsetMs(epoch, timeZone);
+  let epoch = guess - tzOffsetMs(guess, timeZone2);
+  epoch = guess - tzOffsetMs(epoch, timeZone2);
   return epoch;
 }
-function toEpochMs(input2, timeZone, edge = "start") {
+function toEpochMs(input2, timeZone2, edge = "start") {
   const s = input2.trim();
   if (/^\d{12,14}$/.test(s)) return s;
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
@@ -39214,16 +39257,16 @@ function toEpochMs(input2, timeZone, edge = "start") {
   }
   if (h === void 0) {
     return String(
-      edge === "start" ? wallToEpoch(+y, +mo, +d, 0, 0, 0, 0, timeZone) : wallToEpoch(+y, +mo, +d, 23, 59, 59, 999, timeZone)
+      edge === "start" ? wallToEpoch(+y, +mo, +d, 0, 0, 0, 0, timeZone2) : wallToEpoch(+y, +mo, +d, 23, 59, 59, 999, timeZone2)
     );
   }
-  return String(wallToEpoch(+y, +mo, +d, +h, +mi, sec ? +sec : 0, 0, timeZone));
+  return String(wallToEpoch(+y, +mo, +d, +h, +mi, sec ? +sec : 0, 0, timeZone2));
 }
-function fromEpochMs(v, timeZone) {
+function fromEpochMs(v, timeZone2) {
   const n = Number(v);
   if (!v || !Number.isFinite(n)) return null;
   return new Intl.DateTimeFormat("sv-SE", {
-    timeZone,
+    timeZone: timeZone2,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -39412,7 +39455,10 @@ function registerTools(server, sdp, cfg) {
   }
   function assertSameProject(rec, projectId, what) {
     const pid = rec?.project?.id;
-    if (pid !== void 0 && pid !== null && String(pid) !== projectId) {
+    if (pid === void 0 || pid === null) {
+      throw Object.assign(new Error(`Write refused: could not confirm that ${what} belongs to project ${projectId}.`), { refused: true });
+    }
+    if (String(pid) !== projectId) {
       throw Object.assign(new Error(`Write refused: ${what} belongs to project ${pid}, not ${projectId}.`), { refused: true });
     }
   }
@@ -39910,7 +39956,7 @@ function commentTarget(projectId, milestoneId, taskId) {
 }
 
 // src/server.ts
-var VERSION = "0.5.1";
+var VERSION = "0.5.2";
 var INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
 - Changes are made as the signed-in user and limited by that user's ServiceDesk permissions; the server may further restrict writes to configured projects.
 - Dates are YYYY-MM-DD in the configured timezone (SDP_TIMEZONE, default UTC).

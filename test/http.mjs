@@ -19,6 +19,7 @@ const mock = createServer(async (req, res) => {
   seen.push({ m: req.method, p: url.pathname, auth: req.headers.authorization, body, q: url.search });
   if (url.pathname === "/oauth/user/info") {
     const t = (req.headers.authorization ?? "").replace("Zoho-oauthtoken ", "");
+    if (t === "tok-zoho-down") return send({ error: "internal" }, 503);
     return USERS[t] ? send({ Email: USERS[t], Display_Name: "Test" }) : send({ error: "invalid" }, 401);
   }
   if (url.pathname === "/oauth/v2/token") {
@@ -193,6 +194,34 @@ try {
   }
   check(got429, "rate limit per user → 429");
 
+  // R1: OAuth facade forwards only allow-listed, non-repeated parameters
+  const cb = "redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback";
+  r = await fetch(`${base}/oauth/authorize?response_type=code&client_id=cid&client_id=attacker&${cb}`, { redirect: "manual" });
+  check(r.status === 400 && !r.headers.get("location"), "R1: repeated client_id refused");
+  r = await fetch(`${base}/oauth/authorize?response_type=code&client_id=cid&${cb}&${cb}`, { redirect: "manual" });
+  check(r.status === 400, "R1: any repeated parameter refused");
+  r = await fetch(`${base}/oauth/authorize?response_type=code&client_id=cid&${cb}&code_challenge=abc&code_challenge_method=plain`, { redirect: "manual" });
+  check(r.status === 400, "R1: PKCE plain refused");
+  r = await fetch(`${base}/oauth/authorize?response_type=token&client_id=cid&${cb}`, { redirect: "manual" });
+  check(r.status === 400, "R1: only response_type=code");
+  r = await fetch(`${base}/oauth/authorize?response_type=code&client_id=cid&${cb}&prompt=none&login_hint=x&foo=1`, { redirect: "manual" });
+  const loc2 = new URL(r.headers.get("location") ?? "http://x");
+  check(r.status === 302 && loc2.searchParams.get("prompt") === "consent" && !loc2.searchParams.has("foo") && !loc2.searchParams.has("login_hint"), "R1: unknown parameters dropped, prompt=consent forced");
+
+  // R8: no SSE stream, no sessions
+  for (const method of ["GET", "DELETE"]) {
+    r = await fetch(`${base}/mcp`, { method, headers: { authorization: "Bearer tok-jane", accept: "text/event-stream" } });
+    check(r.status === 405 && r.headers.get("allow") === "POST", `R8: ${method} /mcp → 405 Allow: POST`);
+    await r.text();
+  }
+
+  // R7: Zoho outage is not cached as a bad token
+  const downBefore = seen.filter((x) => x.auth === "Zoho-oauthtoken tok-zoho-down").length;
+  r = await rpc({ jsonrpc: "2.0", id: 1, method: "ping" }, { authorization: "Bearer tok-zoho-down" });
+  const r2 = await rpc({ jsonrpc: "2.0", id: 1, method: "ping" }, { authorization: "Bearer tok-zoho-down" });
+  const downCalls = seen.filter((x) => x.auth === "Zoho-oauthtoken tok-zoho-down").length - downBefore;
+  check(r.status === 503 && r2.status === 503 && r.headers.get("retry-after") && downCalls === 2, "R7: Zoho 5xx → 503, not cached");
+
   // 11. Unknown paths
   check((await fetch(`${base}/admin`)).status === 404, "unknown path → 404");
 
@@ -210,6 +239,24 @@ try {
   for (let i = 0; i < 10 && !ip429; i++) ip429 = (await fetch(`http://127.0.0.1:${port + 3}/.well-known/oauth-protected-resource`)).status === 429;
   check(ip429, "F2: per-IP rate limit before authentication");
   ipSrv.proc.kill();
+
+  // R10: signed-in users are not counted against the shared per-IP limit
+  const ipSrv2 = await start(port + 4, { IP_RATE_LIMIT_PER_MINUTE: "3" });
+  let authed429 = false;
+  for (let i = 0; i < 8; i++) {
+    const rr = await fetch(`http://127.0.0.1:${port + 4}/mcp`, { method: "POST", headers: { authorization: "Bearer tok-jane", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: i, method: "ping" }) });
+    authed429 ||= rr.status === 429;
+    await rr.text();
+  }
+  let anon429 = false;
+  for (let i = 0; i < 6 && !anon429; i++) anon429 = (await fetch(`http://127.0.0.1:${port + 4}/.well-known/oauth-protected-resource`)).status === 429;
+  check(!authed429 && anon429, "R10: per-IP limit applies to anonymous traffic only");
+  ipSrv2.proc.kill();
+
+  // O2: misspelt time zone refused at startup
+  const badTz = await start(port + 5, { SDP_TIMEZONE: "Europe/Zurch" });
+  await new Promise((r) => setTimeout(r, 300));
+  check(badTz.exited !== null && /SDP_TIMEZONE/.test(badTz.text), "O2: invalid SDP_TIMEZONE refused at startup");
 
   console.log(`\n${passed} checks passed`);
 } finally {

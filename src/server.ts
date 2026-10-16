@@ -7,7 +7,7 @@ import { createHttpHandler } from "./http.js";
 import { SdpClient } from "./sdp.js";
 import { registerTools } from "./tools.js";
 
-const VERSION = "0.5.1";
+const VERSION = "0.5.2";
 
 const INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
 - Changes are made as the signed-in user and limited by that user's ServiceDesk permissions; the server may further restrict writes to configured projects.

@@ -11,7 +11,7 @@ import { fetchZohoIdentity, type UserIdentity } from "./auth.js";
  *   /.well-known/oauth-protected-resource[/mcp]   RFC 9728 — points clients at this server as authorization server
  *   /.well-known/oauth-authorization-server        RFC 8414 — describes the facade below
  *   /.well-known/openid-configuration              same document, for clients that only read OIDC discovery
- *   /oauth/authorize                               redirect to Zoho, adding access_type=offline and normalising scopes
+ *   /oauth/authorize                               redirect to Zoho (allow-listed parameters only), adding access_type=offline and normalising scopes
  *   /oauth/token                                   stateless pass-through to Zoho's token endpoint
  *   /mcp                                           MCP (Streamable HTTP, stateless), requires the user's Zoho token
  *   /healthz                                       liveness
@@ -25,6 +25,11 @@ type MakeServer = (token: string, user: UserIdentity, onTokenRejected: () => voi
 const MAX_OAUTH_BODY = 16 * 1024;
 const MAX_MCP_BODY = 256 * 1024;
 const NEGATIVE_CACHE_MS = 60_000;
+
+/** The only parameters forwarded to Zoho's authorize endpoint. Everything else is dropped. */
+const AUTHORIZE_PARAMS = ["response_type", "client_id", "redirect_uri", "scope", "state", "code_challenge", "code_challenge_method"];
+
+class ZohoUnavailable extends Error {}
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
   const text = typeof body === "string" ? body : JSON.stringify(body);
@@ -87,14 +92,30 @@ export function createHttpHandler(cfg: Config, makeServer: MakeServer) {
   }
   setInterval(prune, 60_000).unref();
 
+  /** Cached result for a token, if any and still valid (undefined = not checked recently). */
+  function cached(token: string): UserIdentity | null | undefined {
+    const hit = identityCache.get(tokenKey(token));
+    return hit && hit.exp > Date.now() ? hit.user : undefined;
+  }
+
   async function identify(token: string): Promise<UserIdentity | null> {
-    const key = tokenKey(token);
-    const hit = identityCache.get(key);
-    if (hit && hit.exp > Date.now()) return hit.user;
-    const user = await fetchZohoIdentity(cfg, token).catch(() => null);
-    // Failures are cached briefly too, so junk tokens cannot make us hammer Zoho.
-    identityCache.set(key, { user, exp: Date.now() + (user ? cfg.tokenCacheSeconds * 1000 : NEGATIVE_CACHE_MS) });
+    const hit = cached(token);
+    if (hit !== undefined) return hit;
+    let user: UserIdentity | null;
+    try {
+      user = await fetchZohoIdentity(cfg, token);
+    } catch (e) {
+      // Zoho down or slow: not the user's fault, so nothing is cached and the client may retry.
+      throw new ZohoUnavailable((e as Error).message);
+    }
+    // Rejections are cached briefly too, so junk tokens cannot make us hammer Zoho.
+    identityCache.set(tokenKey(token), { user, exp: Date.now() + (user ? cfg.tokenCacheSeconds * 1000 : NEGATIVE_CACHE_MS) });
     return user;
+  }
+
+  function bearer(req: IncomingMessage): string | undefined {
+    const m = (req.headers.authorization ?? "").match(/^(?:Bearer|Zoho-oauthtoken)\s+(.+)$/i);
+    return m?.[1].trim() || undefined;
   }
 
   function allowed(user: UserIdentity): boolean {
@@ -133,13 +154,27 @@ export function createHttpHandler(cfg: Config, makeServer: MakeServer) {
 
   // ---- OAuth facade ----
   function authorize(url: URL, res: ServerResponse) {
-    if (url.searchParams.get("client_id") !== cfg.clientId) {
-      return send(res, 400, { error: "invalid_client", error_description: "Unknown client_id" });
+    const q = url.searchParams;
+    const bad = (error: string, error_description: string) => send(res, 400, { error, error_description });
+    // A repeated parameter could make this check read one value and Zoho another: refuse all repeats.
+    const seen = new Set<string>();
+    for (const k of q.keys()) {
+      if (seen.has(k)) return bad("invalid_request", `Parameter ${k} given more than once`);
+      seen.add(k);
     }
+    if (q.get("client_id") !== cfg.clientId) return bad("invalid_client", "Unknown client_id");
+    if (q.get("response_type") !== "code") return bad("unsupported_response_type", "Only response_type=code is supported");
+    if (!q.get("redirect_uri")) return bad("invalid_request", "redirect_uri is required");
+    // PKCE: optional (the clients are confidential), but if used it must be S256 — never "plain".
+    if (q.has("code_challenge") && q.get("code_challenge_method") !== "S256")
+      return bad("invalid_request", "code_challenge_method must be S256");
+    if (!q.has("code_challenge") && q.has("code_challenge_method"))
+      return bad("invalid_request", "code_challenge_method without code_challenge");
+
     const out = new URLSearchParams();
-    for (const [k, v] of url.searchParams) {
-      if (k === "resource") continue; // RFC 8707 parameter, unknown to Zoho
-      out.set(k, v);
+    for (const k of AUTHORIZE_PARAMS) {
+      const v = q.get(k);
+      if (v !== null) out.set(k, v);
     }
     // Zoho expects comma-separated scopes; MCP clients send space-separated ones (and may add offline_access).
     const requested = (url.searchParams.get("scope") ?? "")
@@ -147,7 +182,7 @@ export function createHttpHandler(cfg: Config, makeServer: MakeServer) {
       .filter((s) => s && cfg.zohoScopes.some((z) => z.toLowerCase() === s.toLowerCase()));
     out.set("scope", (requested.length ? requested : cfg.zohoScopes).join(","));
     out.set("access_type", "offline"); // without it Zoho issues no refresh token
-    if (!out.has("prompt")) out.set("prompt", "consent");
+    out.set("prompt", "consent");
     res.writeHead(302, { Location: `${zohoAuthorize}?${out.toString()}`, "Cache-Control": "no-store" });
     res.end();
   }
@@ -197,28 +232,33 @@ export function createHttpHandler(cfg: Config, makeServer: MakeServer) {
     if (req.headers.host && req.headers.host !== publicHost) return send(res, 403, { error: "invalid_host" });
     const origin = req.headers.origin;
     if (origin && !okOrigins.has(origin)) return send(res, 403, { error: "invalid_origin" });
+    // Stateless server: no server-to-client SSE stream (GET) and no sessions to end (DELETE).
+    if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
 
-    const h = req.headers.authorization ?? "";
-    const m = h.match(/^(?:Bearer|Zoho-oauthtoken)\s+(.+)$/i);
-    if (!m) return unauthorized(res);
-    const tok = m[1].trim();
-    const user = await identify(tok);
+    const tok = bearer(req);
+    if (!tok) return unauthorized(res);
+    let user: UserIdentity | null;
+    try {
+      user = await identify(tok);
+    } catch (e) {
+      if (!(e instanceof ZohoUnavailable)) throw e;
+      process.stderr.write(`[http] token check unavailable: ${e.message}\n`);
+      return send(res, 503, { error: "temporarily_unavailable", error_description: "Zoho could not be reached to check the sign-in; retry shortly" }, { "Retry-After": "30" });
+    }
     if (!user) return unauthorized(res, "invalid_token");
     if (!allowed(user)) return send(res, 403, { error: "forbidden", error_description: `${user.email} is not allowed to use this server` });
     if (over(hits, user.email, cfg.rateLimitPerMinute)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
 
     // Parse the body ourselves: size limit, and no JSON-RPC batches (one HTTP request = one MCP message).
     let parsed: unknown;
-    if (req.method === "POST") {
-      const raw = await readBody(req, MAX_MCP_BODY);
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return send(res, 400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
-      }
-      if (Array.isArray(parsed)) {
-        return send(res, 400, { jsonrpc: "2.0", error: { code: -32600, message: "Batch requests are not supported" }, id: null });
-      }
+    const raw = await readBody(req, MAX_MCP_BODY);
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return send(res, 400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
+    }
+    if (Array.isArray(parsed)) {
+      return send(res, 400, { jsonrpc: "2.0", error: { code: -32600, message: "Batch requests are not supported" }, id: null });
     }
 
     const key = tokenKey(tok);
@@ -237,7 +277,12 @@ export function createHttpHandler(cfg: Config, makeServer: MakeServer) {
       const url = new URL(req.url ?? "/", base);
       const p = url.pathname.replace(/\/+$/, "") || "/";
       if (p === "/healthz") return send(res, 200, "ok");
-      if (over(ipHits, clientIp(req), cfg.ipRateLimitPerMinute)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
+      // Per-IP limit for anonymous traffic only: all Claude users share Anthropic's addresses and all
+      // Copilot users Microsoft's, so signed-in users are limited per user (in mcp()) instead.
+      const tok = p === "/mcp" ? bearer(req) : undefined;
+      const signedIn = tok !== undefined && !!cached(tok);
+      if (!signedIn && over(ipHits, clientIp(req), cfg.ipRateLimitPerMinute))
+        return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
       if (req.method === "GET" && (p === "/.well-known/oauth-protected-resource" || p === "/.well-known/oauth-protected-resource/mcp"))
         return send(res, 200, prm);
       if (

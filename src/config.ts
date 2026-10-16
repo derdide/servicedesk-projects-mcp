@@ -116,6 +116,16 @@ export function loadConfig(): Config {
   return cfg;
 }
 
+/** Fail at startup on a misspelt time zone instead of on the first date conversion. */
+function timeZone(tz: string): string {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+  } catch {
+    throw new Error(`SDP_TIMEZONE: "${tz}" is not a valid IANA time zone (e.g. Europe/Zurich)`);
+  }
+  return tz;
+}
+
 function buildConfig(): Config {
   const writeRaw = (process.env.SDP_WRITE_PROJECT_IDS ?? "").trim();
   const transport = (process.env.MCP_TRANSPORT as "stdio" | "http") ?? "stdio";
@@ -137,7 +147,7 @@ function buildConfig(): Config {
               .filter(Boolean),
           ),
     auditLogPath: process.env.SDP_AUDIT_LOG || undefined,
-    timezone: process.env.SDP_TIMEZONE ?? "UTC",
+    timezone: timeZone(process.env.SDP_TIMEZONE ?? "UTC"),
     transport,
     httpPort: Number(process.env.PORT ?? 8080),
     defaultTaskTemplate: process.env.SDP_DEFAULT_TASK_TEMPLATE ?? "Default Task",

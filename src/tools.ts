@@ -219,8 +219,12 @@ export function registerTools(server: McpServer, sdp: SdpClient, cfg: Config): v
 
   /** Refuse if a fetched record says it belongs to another project. */
   function assertSameProject(rec: Json, projectId: string, what: string) {
+    // Fail closed: if ServiceDesk does not say which project the record belongs to, do not write.
     const pid = rec?.project?.id;
-    if (pid !== undefined && pid !== null && String(pid) !== projectId) {
+    if (pid === undefined || pid === null) {
+      throw Object.assign(new Error(`Write refused: could not confirm that ${what} belongs to project ${projectId}.`), { refused: true });
+    }
+    if (String(pid) !== projectId) {
       throw Object.assign(new Error(`Write refused: ${what} belongs to project ${pid}, not ${projectId}.`), { refused: true });
     }
   }

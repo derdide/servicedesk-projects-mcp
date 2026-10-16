@@ -27,7 +27,7 @@ const mock = createServer(async (req, res) => {
   if (p.endsWith("/tasks") && req.method === "POST") { const t = JSON.parse(input).task; return send({ task: { id: String(900000 + log.length), ...t, project: { id: P }, milestone: { id: M, title: "Phase 1" } } }); }
   if (/\/tasks\/\d+$/.test(p) && req.method === "GET") {
     const id = p.split("/").pop();
-    return send({ task: { id, title: "Old title", status: { name: "Open" }, percentage_completion: 0, project: { id: id === "100000000000999" ? "100000000000002" : P } } });
+    return send({ task: { id, title: "Old title", status: { name: "Open" }, percentage_completion: 0, ...(id === "100000000000888" ? {} : { project: { id: id === "100000000000999" ? "100000000000002" : P } }) } });
   }
   if (p.includes("/tasks/") && p.endsWith("/comments")) return send({ task_comment: { id: "C1", comment: JSON.parse(input).task_comment.comment } });
   if (p.includes("/tasks/") && req.method === "PUT") return send({ task: { id: "X", ...JSON.parse(input).task } });
@@ -103,6 +103,8 @@ try {
   check(puts() === before && !log.some((l) => l.p.includes("..") || l.p.includes("%2e") || l.p.includes("/requests")), "F1: no request left the project paths");
   const other = await call("sdp_update_task", { project_id: P, task_id: "100000000000999", status: "Closed" });
   check(other.err && /belongs to project/.test(other.text) && puts() === before, "F1: task of another project refused before any PUT");
+  const noProj = await call("sdp_update_task", { project_id: P, task_id: "100000000000888", status: "Closed" });
+  check(noProj.err && /could not confirm/.test(noProj.text) && puts() === before, "R4: task without project information refused (fail closed)");
   const refused2 = await call("sdp_create_task", { project_id: "100000000000002", title: "x" });
   check(refused2.err && !refused2.text.includes(P), "F10: refusal does not reveal writable project ids");
 
