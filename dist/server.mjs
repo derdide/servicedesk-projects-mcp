@@ -7173,8 +7173,8 @@ var require_dist = __commonJS({
         return ajv;
       }
       const [formats, exportName] = opts.mode === "fast" ? [formats_1.fastFormats, fastName] : [formats_1.fullFormats, fullName];
-      const list = opts.formats || formats_1.formatNames;
-      addFormats(ajv, list, formats, exportName);
+      const list2 = opts.formats || formats_1.formatNames;
+      addFormats(ajv, list2, formats, exportName);
       if (opts.keywords)
         (0, limit_1.default)(ajv);
       return ajv;
@@ -7186,11 +7186,11 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs, exportName) {
+    function addFormats(ajv, list2, fs, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
-      for (const f of list)
+      for (const f of list2)
         ajv.addFormat(f, fs[f]);
     }
     module.exports = exports = formatsPlugin;
@@ -27094,8 +27094,8 @@ var contributors = {
 function aggregateChecks(schema) {
   const agg = {};
   const def = schema._zod.def;
-  const list = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
-  for (const ch of list)
+  const list2 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
+  for (const ch of list2)
     contributors[ch._zod.def.check]?.(agg, ch._zod.def);
   const bag = schema._zod.bag;
   if (bag.minimum !== void 0)
@@ -36586,6 +36586,156 @@ var StdioServerTransport = class {
   }
 };
 
+// src/config.ts
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+function loadDotEnv() {
+  const explicit = process.env.SDP_ENV_FILE;
+  let here;
+  try {
+    here = dirname(fileURLToPath(import.meta.url));
+  } catch {
+    here = process.cwd();
+  }
+  const candidates = explicit ? [explicit] : [join(here, ".env"), join(here, "..", ".env")];
+  for (const file2 of candidates) {
+    if (!existsSync(file2)) continue;
+    for (const raw of readFileSync(file2, "utf8").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq < 0) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if (val.startsWith('"') && val.endsWith('"') || val.startsWith("'") && val.endsWith("'")) {
+        val = val.slice(1, -1);
+      }
+      if (process.env[key] === void 0) process.env[key] = val;
+    }
+    break;
+  }
+}
+loadDotEnv();
+function req(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required configuration: ${name}`);
+  return v;
+}
+function list(name) {
+  return (process.env[name] ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+function jsonMap(name) {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === "object" && !Array.isArray(v)) return v;
+  } catch {
+  }
+  throw new Error(`${name} must be a JSON object, e.g. {"123456":"My template"}`);
+}
+function loadConfig() {
+  const writeRaw = (process.env.SDP_WRITE_PROJECT_IDS ?? "").trim();
+  const transport = process.env.MCP_TRANSPORT ?? "stdio";
+  const single = transport !== "http";
+  return {
+    sdpBaseUrl: req("SDP_BASE_URL").replace(/\/+$/, ""),
+    portal: req("SDP_PORTAL"),
+    zohoAccountsUrl: (process.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.com").replace(/\/+$/, ""),
+    clientId: single ? req("ZOHO_CLIENT_ID") : process.env.ZOHO_CLIENT_ID,
+    clientSecret: single ? req("ZOHO_CLIENT_SECRET") : process.env.ZOHO_CLIENT_SECRET,
+    refreshToken: process.env.ZOHO_REFRESH_TOKEN,
+    writeProjectIds: writeRaw === "*" ? "*" : new Set(
+      writeRaw.split(",").map((s) => s.trim()).filter(Boolean)
+    ),
+    auditLogPath: process.env.SDP_AUDIT_LOG || void 0,
+    timezone: process.env.SDP_TIMEZONE ?? "UTC",
+    transport,
+    httpPort: Number(process.env.PORT ?? 8080),
+    defaultTaskTemplate: process.env.SDP_DEFAULT_TASK_TEMPLATE ?? "Default Task",
+    taskTemplates: jsonMap("SDP_TASK_TEMPLATES"),
+    streamField: process.env.SDP_STREAM_FIELD || void 0,
+    publicBaseUrl: single ? process.env.PUBLIC_BASE_URL?.replace(/\/+$/, "") : req("PUBLIC_BASE_URL").replace(/\/+$/, ""),
+    zohoScopes: (process.env.ZOHO_SCOPES ?? "SDPOnDemand.projects.READ,SDPOnDemand.projects.CREATE,SDPOnDemand.projects.UPDATE,AaaServer.profile.READ").split(/[ ,]+/).filter(Boolean),
+    allowedEmailDomains: list("ALLOWED_EMAIL_DOMAINS").map((d) => d.replace(/^@/, "")),
+    allowedUsers: list("ALLOWED_USERS"),
+    rateLimitPerMinute: Number(process.env.RATE_LIMIT_PER_MINUTE ?? 120),
+    tokenCacheSeconds: Number(process.env.TOKEN_CACHE_SECONDS ?? 300)
+  };
+}
+
+// src/auth.ts
+var RefreshTokenProvider = class {
+  constructor(cfg) {
+    this.cfg = cfg;
+    if (!cfg.refreshToken || !cfg.clientId || !cfg.clientSecret) throw new Error("Missing required configuration: ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET and ZOHO_REFRESH_TOKEN");
+  }
+  cfg;
+  token;
+  expiresAt = 0;
+  inflight;
+  invalidate() {
+    this.token = void 0;
+    this.expiresAt = 0;
+  }
+  async getAccessToken() {
+    if (this.token && Date.now() < this.expiresAt - 6e4) return this.token;
+    if (!this.inflight) {
+      this.inflight = this.refresh().finally(() => this.inflight = void 0);
+    }
+    return this.inflight;
+  }
+  async refresh() {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: this.cfg.refreshToken,
+      client_id: this.cfg.clientId,
+      client_secret: this.cfg.clientSecret
+    });
+    const res = await fetch(`${this.cfg.zohoAccountsUrl}/oauth/v2/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
+    const json3 = await res.json().catch(() => ({}));
+    if (!res.ok || typeof json3.access_token !== "string") {
+      throw new Error(
+        `Zoho token refresh failed (HTTP ${res.status}): ${JSON.stringify(json3)}. Check ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET / ZOHO_REFRESH_TOKEN and ZOHO_ACCOUNTS_URL (EU = https://accounts.zoho.eu).`
+      );
+    }
+    this.token = json3.access_token;
+    const ttl = typeof json3.expires_in === "number" ? json3.expires_in : 3600;
+    this.expiresAt = Date.now() + ttl * 1e3;
+    return this.token;
+  }
+};
+var BearerTokenProvider = class {
+  constructor(token) {
+    this.token = token;
+  }
+  token;
+  async getAccessToken() {
+    return this.token;
+  }
+  invalidate() {
+  }
+};
+async function fetchZohoIdentity(cfg, token) {
+  const res = await fetch(`${cfg.zohoAccountsUrl}/oauth/user/info`, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` }
+  });
+  if (!res.ok) return null;
+  const j = await res.json().catch(() => ({}));
+  const email3 = typeof j.Email === "string" ? j.Email : typeof j.email === "string" ? j.email : void 0;
+  if (!email3) return null;
+  const name = typeof j.Display_Name === "string" ? j.Display_Name : void 0;
+  return { email: email3.toLowerCase(), name };
+}
+
+// src/http.ts
+import { createHash } from "node:crypto";
+
 // node_modules/@hono/node-server/dist/constants-BLSFu_RU.mjs
 var X_ALREADY_SENT = "x-hono-already-sent";
 
@@ -38688,108 +38838,160 @@ var StreamableHTTPServerTransport = class {
   }
 };
 
-// src/config.ts
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-function loadDotEnv() {
-  const explicit = process.env.SDP_ENV_FILE;
-  let here;
-  try {
-    here = dirname(fileURLToPath(import.meta.url));
-  } catch {
-    here = process.cwd();
-  }
-  const candidates = explicit ? [explicit] : [join(here, ".env"), join(here, "..", ".env")];
-  for (const file2 of candidates) {
-    if (!existsSync(file2)) continue;
-    for (const raw of readFileSync(file2, "utf8").split(/\r?\n/)) {
-      const line = raw.trim();
-      if (!line || line.startsWith("#")) continue;
-      const eq = line.indexOf("=");
-      if (eq < 0) continue;
-      const key = line.slice(0, eq).trim();
-      let val = line.slice(eq + 1).trim();
-      if (val.startsWith('"') && val.endsWith('"') || val.startsWith("'") && val.endsWith("'")) {
-        val = val.slice(1, -1);
-      }
-      if (process.env[key] === void 0) process.env[key] = val;
-    }
-    break;
-  }
+// src/http.ts
+var MAX_BODY = 16 * 1024;
+function send(res, status, body, headers = {}) {
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": typeof body === "string" ? "text/plain; charset=utf-8" : "application/json",
+    "Cache-Control": "no-store",
+    ...headers
+  });
+  res.end(text);
 }
-loadDotEnv();
-function req(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing required configuration: ${name}`);
-  return v;
+async function readBody(req2) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req2) {
+    size += chunk.length;
+    if (size > MAX_BODY) throw Object.assign(new Error("Request body too large"), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
-function loadConfig() {
-  const writeRaw = (process.env.SDP_WRITE_PROJECT_IDS ?? "").trim();
-  return {
-    sdpBaseUrl: req("SDP_BASE_URL").replace(/\/+$/, ""),
-    portal: req("SDP_PORTAL"),
-    zohoAccountsUrl: (process.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.com").replace(/\/+$/, ""),
-    clientId: req("ZOHO_CLIENT_ID"),
-    clientSecret: req("ZOHO_CLIENT_SECRET"),
-    refreshToken: process.env.ZOHO_REFRESH_TOKEN,
-    writeProjectIds: writeRaw === "*" ? "*" : new Set(
-      writeRaw.split(",").map((s) => s.trim()).filter(Boolean)
-    ),
-    auditLogPath: process.env.SDP_AUDIT_LOG || void 0,
-    timezone: process.env.SDP_TIMEZONE ?? "UTC",
-    transport: process.env.MCP_TRANSPORT ?? "stdio",
-    httpPort: Number(process.env.PORT ?? 8080),
-    defaultTaskTemplate: process.env.SDP_DEFAULT_TASK_TEMPLATE ?? "Default Task",
-    streamField: process.env.SDP_STREAM_FIELD || void 0
+function createHttpHandler(cfg, makeServer) {
+  const base = cfg.publicBaseUrl;
+  const resource = `${base}/mcp`;
+  const prmUrl = `${base}/.well-known/oauth-protected-resource/mcp`;
+  const zohoAuthorize = `${cfg.zohoAccountsUrl}/oauth/v2/auth`;
+  const zohoToken = `${cfg.zohoAccountsUrl}/oauth/v2/token`;
+  const prm = {
+    resource,
+    authorization_servers: [base],
+    scopes_supported: cfg.zohoScopes,
+    bearer_methods_supported: ["header"],
+    resource_name: "ServiceDesk Plus projects"
   };
-}
-
-// src/auth.ts
-var RefreshTokenProvider = class {
-  constructor(cfg) {
-    this.cfg = cfg;
-    if (!cfg.refreshToken) throw new Error("Missing required configuration: ZOHO_REFRESH_TOKEN");
-  }
-  cfg;
-  token;
-  expiresAt = 0;
-  inflight;
-  invalidate() {
-    this.token = void 0;
-    this.expiresAt = 0;
-  }
-  async getAccessToken() {
-    if (this.token && Date.now() < this.expiresAt - 6e4) return this.token;
-    if (!this.inflight) {
-      this.inflight = this.refresh().finally(() => this.inflight = void 0);
+  const asMeta = {
+    issuer: base,
+    authorization_endpoint: `${base}/oauth/authorize`,
+    token_endpoint: `${base}/oauth/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
+    scopes_supported: cfg.zohoScopes
+  };
+  const identityCache = /* @__PURE__ */ new Map();
+  const hits = /* @__PURE__ */ new Map();
+  async function identify(token2) {
+    const key = createHash("sha256").update(token2).digest("hex");
+    const hit = identityCache.get(key);
+    if (hit && hit.exp > Date.now()) return hit.user;
+    const user2 = await fetchZohoIdentity(cfg, token2);
+    if (user2) {
+      identityCache.set(key, { user: user2, exp: Date.now() + cfg.tokenCacheSeconds * 1e3 });
+      if (identityCache.size > 5e3) {
+        for (const [k, v] of identityCache) if (v.exp <= Date.now()) identityCache.delete(k);
+      }
     }
-    return this.inflight;
+    return user2;
   }
-  async refresh() {
-    const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: this.cfg.refreshToken,
-      client_id: this.cfg.clientId,
-      client_secret: this.cfg.clientSecret
-    });
-    const res = await fetch(`${this.cfg.zohoAccountsUrl}/oauth/v2/token`, {
+  function allowed(user2) {
+    if (cfg.allowedUsers.length && cfg.allowedUsers.includes(user2.email)) return true;
+    if (cfg.allowedEmailDomains.length) return cfg.allowedEmailDomains.includes(user2.email.split("@")[1] ?? "");
+    return cfg.allowedUsers.length === 0;
+  }
+  function rateLimited(email3) {
+    const now = Date.now();
+    const h = hits.get(email3);
+    if (!h || now - h.windowStart >= 6e4) {
+      hits.set(email3, { windowStart: now, count: 1 });
+      return false;
+    }
+    h.count++;
+    return h.count > cfg.rateLimitPerMinute;
+  }
+  function unauthorized(res, error62) {
+    const parts = [`Bearer resource_metadata="${prmUrl}"`, `scope="${cfg.zohoScopes.join(" ")}"`];
+    if (error62) parts.push(`error="${error62}"`);
+    send(res, 401, { error: error62 ?? "unauthorized" }, { "WWW-Authenticate": parts.join(", ") });
+  }
+  function authorize(url2, res) {
+    const out = new URLSearchParams();
+    for (const [k, v] of url2.searchParams) {
+      if (k === "resource") continue;
+      out.set(k, v);
+    }
+    const requested = (url2.searchParams.get("scope") ?? "").split(/[ ,]+/).filter((s) => s && cfg.zohoScopes.some((z2) => z2.toLowerCase() === s.toLowerCase()));
+    out.set("scope", (requested.length ? requested : cfg.zohoScopes).join(","));
+    out.set("access_type", "offline");
+    if (!out.has("prompt")) out.set("prompt", "consent");
+    res.writeHead(302, { Location: `${zohoAuthorize}?${out.toString()}`, "Cache-Control": "no-store" });
+    res.end();
+  }
+  async function token(req2, res) {
+    const body = new URLSearchParams(await readBody(req2));
+    body.delete("resource");
+    const auth = req2.headers.authorization;
+    if (auth?.startsWith("Basic ")) {
+      const [id, secret] = Buffer.from(auth.slice(6), "base64").toString("utf8").split(":");
+      if (id && !body.has("client_id")) body.set("client_id", decodeURIComponent(id));
+      if (secret && !body.has("client_secret")) body.set("client_secret", decodeURIComponent(secret));
+    }
+    const upstream = await fetch(zohoToken, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body
     });
-    const json3 = await res.json().catch(() => ({}));
-    if (!res.ok || typeof json3.access_token !== "string") {
-      throw new Error(
-        `Zoho token refresh failed (HTTP ${res.status}): ${JSON.stringify(json3)}. Check ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET / ZOHO_REFRESH_TOKEN and ZOHO_ACCOUNTS_URL (EU = https://accounts.zoho.eu).`
-      );
+    const json3 = await upstream.json().catch(() => ({}));
+    if (!json3.access_token) {
+      const map2 = { invalid_code: "invalid_grant", invalid_client_secret: "invalid_client" };
+      const err = typeof json3.error === "string" ? json3.error : "invalid_request";
+      send(res, upstream.ok ? 400 : upstream.status, { error: map2[err] ?? err, error_description: `Zoho: ${err}` });
+      return;
     }
-    this.token = json3.access_token;
-    const ttl = typeof json3.expires_in === "number" ? json3.expires_in : 3600;
-    this.expiresAt = Date.now() + ttl * 1e3;
-    return this.token;
+    send(res, 200, json3);
   }
-};
+  async function mcp(req2, res) {
+    const h = req2.headers.authorization ?? "";
+    const m = h.match(/^(?:Bearer|Zoho-oauthtoken)\s+(.+)$/i);
+    if (!m) return unauthorized(res);
+    const tok = m[1].trim();
+    const user2 = await identify(tok);
+    if (!user2) return unauthorized(res, "invalid_token");
+    if (!allowed(user2)) return send(res, 403, { error: "forbidden", error_description: `${user2.email} is not allowed to use this server` });
+    if (rateLimited(user2.email)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
+    const server = makeServer(tok, user2);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: void 0 });
+    res.on("close", () => {
+      transport.close();
+      server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req2, res);
+  }
+  return async function handle(req2, res) {
+    try {
+      const url2 = new URL(req2.url ?? "/", base);
+      const p = url2.pathname.replace(/\/+$/, "") || "/";
+      if (p === "/healthz") return send(res, 200, "ok");
+      if (req2.method === "GET" && (p === "/.well-known/oauth-protected-resource" || p === "/.well-known/oauth-protected-resource/mcp"))
+        return send(res, 200, prm);
+      if (req2.method === "GET" && (p.startsWith("/.well-known/oauth-authorization-server") || p.startsWith("/.well-known/openid-configuration")))
+        return send(res, 200, asMeta);
+      if (req2.method === "GET" && p === "/oauth/authorize") return authorize(url2, res);
+      if (req2.method === "POST" && p === "/oauth/token") return await token(req2, res);
+      if (p === "/mcp") return await mcp(req2, res);
+      return send(res, 404, { error: "not_found" });
+    } catch (e) {
+      const status = e.status ?? 500;
+      process.stderr.write(`[http] ${req2.method} ${req2.url} failed: ${e.message}
+`);
+      if (!res.headersSent) send(res, status, { error: status === 413 ? "payload_too_large" : "server_error" });
+    }
+  };
+}
 
 // src/sdp.ts
 import { appendFileSync } from "node:fs";
@@ -38803,13 +39005,15 @@ var SdpError = class extends Error {
   body;
 };
 var SdpClient = class {
-  constructor(cfg, tokens) {
+  constructor(cfg, tokens, user2) {
     this.cfg = cfg;
     this.tokens = tokens;
+    this.user = user2;
     this.apiBase = `${cfg.sdpBaseUrl}/app/${encodeURIComponent(cfg.portal)}/api/v3`;
   }
   cfg;
   tokens;
+  user;
   apiBase;
   async get(path, inputData) {
     const qs = inputData ? `?input_data=${encodeURIComponent(JSON.stringify(inputData))}` : "";
@@ -38867,7 +39071,7 @@ var SdpClient = class {
     return json3;
   }
   audit(entry) {
-    const line = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), ...entry });
+    const line = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), ...this.user ? { user: this.user } : {}, ...entry });
     process.stderr.write(`[audit] ${line}
 `);
     if (this.cfg.auditLogPath) {
@@ -39101,8 +39305,8 @@ function registerTools(server, sdp, cfg) {
     async ({ title_contains, max }) => {
       try {
         const extra = title_contains ? { search_criteria: [{ field: "title", condition: "contains", value: title_contains }] } : {};
-        const list = await sdp.listAll("/projects", "projects", max, extra);
-        return ok(list.map(shape.project).map(({ description, ...p }) => p));
+        const list2 = await sdp.listAll("/projects", "projects", max, extra);
+        return ok(list2.map(shape.project).map(({ description, ...p }) => p));
       } catch (e) {
         return fail(e);
       }
@@ -39135,8 +39339,8 @@ function registerTools(server, sdp, cfg) {
     },
     async ({ project_id }) => {
       try {
-        const list = await sdp.listAll(`/projects/${project_id}/project_members`, "project_members");
-        return ok(list.map((m) => ({ member_id: m.id, role: m.role?.name, active: m.is_active, user: user(m.user) })));
+        const list2 = await sdp.listAll(`/projects/${project_id}/project_members`, "project_members");
+        return ok(list2.map((m) => ({ member_id: m.id, role: m.role?.name, active: m.is_active, user: user(m.user) })));
       } catch (e) {
         return fail(e);
       }
@@ -39152,8 +39356,8 @@ function registerTools(server, sdp, cfg) {
     },
     async ({ project_id }) => {
       try {
-        const list = await sdp.listAll(`/projects/${project_id}/milestones`, "milestones");
-        return ok(list.map(shape.milestone).sort((a, b) => (a.index ?? 0) - (b.index ?? 0)));
+        const list2 = await sdp.listAll(`/projects/${project_id}/milestones`, "milestones");
+        return ok(list2.map(shape.milestone).sort((a, b) => (a.index ?? 0) - (b.index ?? 0)));
       } catch (e) {
         return fail(e);
       }
@@ -39174,8 +39378,8 @@ function registerTools(server, sdp, cfg) {
     },
     async ({ project_id, milestone_id, include_description, max }) => {
       try {
-        const list = await sdp.listAll(taskPath(project_id, milestone_id), "tasks", max);
-        const shaped = list.map(shape.task);
+        const list2 = await sdp.listAll(taskPath(project_id, milestone_id), "tasks", max);
+        const shaped = list2.map(shape.task);
         return ok(include_description ? shaped : shaped.map(({ description, ...t }) => t));
       } catch (e) {
         return fail(e);
@@ -39262,7 +39466,7 @@ function registerTools(server, sdp, cfg) {
   );
   async function createTask(a) {
     const body = await buildTaskOrMilestoneBody(a.project_id, a, "task");
-    body.template = { name: a.template ?? cfg.defaultTaskTemplate };
+    body.template = { name: a.template ?? cfg.taskTemplates[a.project_id] ?? cfg.defaultTaskTemplate };
     const res = await sdp.post(taskPath(a.project_id, a.milestone_id), { task: body });
     const t = res.task;
     sdp.audit({ op: "create_task", project_id: a.project_id, milestone_id: a.milestone_id ?? null, task_id: t?.id, title: a.title });
@@ -39426,12 +39630,12 @@ function registerTools(server, sdp, cfg) {
     async ({ project_id }) => {
       try {
         const res = await sdp.get(depPath(project_id), { list_info: { row_count: 100, start_index: 1 } });
-        const list = (res.task_dependencies ?? []).map((d) => ({
+        const list2 = (res.task_dependencies ?? []).map((d) => ({
           id: d.id,
           predecessor: { id: d.parent_task?.id, title: d.parent_task?.title ?? d.parent_task?.name ?? null },
           successor: { id: d.child_task?.id, title: d.child_task?.title ?? d.child_task?.name ?? null }
         }));
-        return ok(list);
+        return ok(list2);
       } catch (e) {
         return fail(e);
       }
@@ -39533,15 +39737,14 @@ function commentTarget(projectId, milestoneId, taskId) {
 }
 
 // src/server.ts
-var VERSION = "0.4.1";
+var VERSION = "0.5.0";
 var INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
-- Writes are only allowed on projects configured in SDP_WRITE_PROJECT_IDS; changes are attributed to the account whose token the server uses.
+- Changes are made as the signed-in user and limited by that user's ServiceDesk permissions; the server may further restrict writes to configured projects.
 - Dates are YYYY-MM-DD in the configured timezone (SDP_TIMEZONE, default UTC).
 - Before bulk changes, run sdp_bulk_create_tasks with dry_run=true and show the plan to the user.
 - Task and milestone owners must be project members.`;
-function buildServer() {
-  const cfg = loadConfig();
-  const sdp = new SdpClient(cfg, new RefreshTokenProvider(cfg));
+function buildServer(cfg, tokens, user2) {
+  const sdp = new SdpClient(cfg, tokens, user2);
   const server = new McpServer({ name: "servicedesk-projects", version: VERSION }, { instructions: INSTRUCTIONS });
   registerTools(server, sdp, cfg);
   return server;
@@ -39549,28 +39752,17 @@ function buildServer() {
 async function main() {
   const cfg = loadConfig();
   if (cfg.transport === "http") {
-    const httpServer = createServer(async (req2, res) => {
-      if (req2.url === "/healthz") {
-        res.writeHead(200).end("ok");
-        return;
-      }
-      if (!req2.url?.startsWith("/mcp")) {
-        res.writeHead(404).end();
-        return;
-      }
-      const server = buildServer();
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: void 0 });
-      res.on("close", () => {
-        transport.close();
-        server.close();
-      });
-      await server.connect(transport);
-      await transport.handleRequest(req2, res);
-    });
-    httpServer.listen(cfg.httpPort, () => process.stderr.write(`servicedesk-projects MCP listening on :${cfg.httpPort}/mcp
-`));
+    const handler = createHttpHandler(cfg, (token, user2) => buildServer(cfg, new BearerTokenProvider(token), user2.email));
+    const httpServer = createServer(handler);
+    httpServer.requestTimeout = 12e4;
+    httpServer.headersTimeout = 3e4;
+    httpServer.listen(
+      cfg.httpPort,
+      () => process.stderr.write(`servicedesk-projects MCP ${VERSION} listening on :${cfg.httpPort} \u2014 public URL ${cfg.publicBaseUrl}/mcp
+`)
+    );
   } else {
-    const server = buildServer();
+    const server = buildServer(cfg, new RefreshTokenProvider(cfg));
     await server.connect(new StdioServerTransport());
     process.stderr.write(`servicedesk-projects MCP ${VERSION} running on stdio
 `);

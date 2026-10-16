@@ -47,26 +47,56 @@ export interface Config {
   sdpBaseUrl: string; // e.g. https://sdpondemand.manageengine.eu or your custom domain
   portal: string; // e.g. servicedesk
   zohoAccountsUrl: string; // e.g. https://accounts.zoho.eu
-  clientId: string;
-  clientSecret: string;
-  refreshToken?: string; // local single-user mode
+  // Single-user (stdio) mode: the server's own Zoho Self Client credentials
+  clientId?: string;
+  clientSecret?: string;
+  refreshToken?: string;
   writeProjectIds: Set<string> | "*"; // projects where create/update is allowed
   auditLogPath?: string;
   timezone: string;
   transport: "stdio" | "http";
   httpPort: number;
   defaultTaskTemplate: string;
+  taskTemplates: Record<string, string>; // per-project task template overrides
   streamField?: string; // udf_* field exposed as "stream" (optional)
+  // Multi-user (http) mode
+  publicBaseUrl?: string; // e.g. https://mcp.example.com (no trailing slash)
+  zohoScopes: string[];
+  allowedEmailDomains: string[]; // e.g. ["example.com"]; empty = any signed-in Zoho user of the portal
+  allowedUsers: string[]; // explicit e-mail allow-list; empty = no restriction beyond domains
+  rateLimitPerMinute: number;
+  tokenCacheSeconds: number;
+}
+
+function list(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function jsonMap(name: string): Record<string, string> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, string>;
+  } catch {
+    /* fall through */
+  }
+  throw new Error(`${name} must be a JSON object, e.g. {"123456":"My template"}`);
 }
 
 export function loadConfig(): Config {
   const writeRaw = (process.env.SDP_WRITE_PROJECT_IDS ?? "").trim();
+  const transport = (process.env.MCP_TRANSPORT as "stdio" | "http") ?? "stdio";
+  const single = transport !== "http";
   return {
     sdpBaseUrl: req("SDP_BASE_URL").replace(/\/+$/, ""),
     portal: req("SDP_PORTAL"),
     zohoAccountsUrl: (process.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.com").replace(/\/+$/, ""),
-    clientId: req("ZOHO_CLIENT_ID"),
-    clientSecret: req("ZOHO_CLIENT_SECRET"),
+    clientId: single ? req("ZOHO_CLIENT_ID") : process.env.ZOHO_CLIENT_ID,
+    clientSecret: single ? req("ZOHO_CLIENT_SECRET") : process.env.ZOHO_CLIENT_SECRET,
     refreshToken: process.env.ZOHO_REFRESH_TOKEN,
     writeProjectIds:
       writeRaw === "*"
@@ -79,9 +109,18 @@ export function loadConfig(): Config {
           ),
     auditLogPath: process.env.SDP_AUDIT_LOG || undefined,
     timezone: process.env.SDP_TIMEZONE ?? "UTC",
-    transport: (process.env.MCP_TRANSPORT as "stdio" | "http") ?? "stdio",
+    transport,
     httpPort: Number(process.env.PORT ?? 8080),
     defaultTaskTemplate: process.env.SDP_DEFAULT_TASK_TEMPLATE ?? "Default Task",
+    taskTemplates: jsonMap("SDP_TASK_TEMPLATES"),
     streamField: process.env.SDP_STREAM_FIELD || undefined,
+    publicBaseUrl: single ? process.env.PUBLIC_BASE_URL?.replace(/\/+$/, "") : req("PUBLIC_BASE_URL").replace(/\/+$/, ""),
+    zohoScopes: (process.env.ZOHO_SCOPES ?? "SDPOnDemand.projects.READ,SDPOnDemand.projects.CREATE,SDPOnDemand.projects.UPDATE,AaaServer.profile.READ")
+      .split(/[ ,]+/)
+      .filter(Boolean),
+    allowedEmailDomains: list("ALLOWED_EMAIL_DOMAINS").map((d) => d.replace(/^@/, "")),
+    allowedUsers: list("ALLOWED_USERS"),
+    rateLimitPerMinute: Number(process.env.RATE_LIMIT_PER_MINUTE ?? 120),
+    tokenCacheSeconds: Number(process.env.TOKEN_CACHE_SECONDS ?? 300),
   };
 }

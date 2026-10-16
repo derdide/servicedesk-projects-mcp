@@ -4,6 +4,11 @@ An [MCP](https://modelcontextprotocol.io) server that lets Claude (or any MCP cl
 
 ServiceDesk Plus Cloud has its own MCP connector, but in our use (autumn 2026) it could only read the Projects module, not change it. This server fills that gap for a project manager who wants an AI assistant to keep the project plan current — with guard-rails.
 
+Two ways to run it:
+
+- **Single user, local** — Claude Desktop starts it on your PC with your own Zoho token ([installation](#installation--single-user-local-claude-desktop)).
+- **Multi-user, hosted** — one HTTPS service for a team; each person signs in with their own ServiceDesk account; works with **Claude** and **Microsoft 365 Copilot / Copilot Studio** ([multi-user mode](#multi-user-mode-http--for-a-team-claude-and-microsoft-copilot)).
+
 > Not affiliated with or endorsed by ManageEngine / Zoho.
 
 ## What it does
@@ -38,7 +43,7 @@ ServiceDesk Plus Cloud has its own MCP connector, but in our use (autumn 2026) i
 - Node.js 18 or later (`node -v`).
 - An MCP client. Instructions below are for **Claude Desktop**; any client that launches stdio servers works.
 
-## Installation
+## Installation — single user, local (Claude Desktop)
 
 ### 1. Get the server
 
@@ -130,8 +135,20 @@ Quit Claude Desktop completely (tray / menu bar) and start it again.
 | `SDP_DEFAULT_TASK_TEMPLATE` | | `Default Task` | Task template used when creating tasks. A task's template cannot be changed after creation |
 | `SDP_STREAM_FIELD` | | none | A task custom field (`udf_*`) exposed as `stream`, e.g. a workstream picklist. Values must match the picklist exactly; existing values are visible on the tasks |
 | `SDP_ENV_FILE` | | | Explicit path of the `.env` file |
-| `MCP_TRANSPORT` | | `stdio` | `http` for container hosting (see below) |
-| `PORT` | | `8080` | HTTP port when `MCP_TRANSPORT=http` |
+| `MCP_TRANSPORT` | | `stdio` | `http` for the multi-user mode (see below) |
+| `SDP_TASK_TEMPLATES` | | `{}` | Per-project task template, JSON: `{"<project id>":"<template name>"}` |
+
+Multi-user (HTTP) mode only — `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET` and `ZOHO_REFRESH_TOKEN` are **not** used in this mode:
+
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `PUBLIC_BASE_URL` | yes | — | Public HTTPS address of the server, e.g. `https://mcp.example.com` (no path) |
+| `PORT` | | `8080` | Listening port inside the container |
+| `ZOHO_SCOPES` | | projects READ/CREATE/UPDATE + `AaaServer.profile.READ` | Scopes requested at sign-in (comma-separated) |
+| `ALLOWED_EMAIL_DOMAINS` | | any | Comma-separated domains whose users may use the server |
+| `ALLOWED_USERS` | | any | Comma-separated e-mails allowed in addition to (or instead of) the domains |
+| `RATE_LIMIT_PER_MINUTE` | | `120` | HTTP requests per user per minute |
+| `TOKEN_CACHE_SECONDS` | | `300` | How long a checked token is trusted before it is checked again |
 
 The `.env` file is looked up next to `server.mjs` and one folder above it. Real environment variables take precedence.
 
@@ -141,19 +158,40 @@ Tested against a live ServiceDesk Plus Cloud instance (EU data centre, custom do
 
 Note on dependencies: ServiceDesk Plus Cloud documents dependencies for request tasks only. The project-task endpoint used here (`/projects/{id}/task_dependencies`, `parent_task` / `child_task`) follows the same pattern and works, but is not in the official API reference, so it could change without notice.
 
-Other limits: no delete (by design); a task cannot be moved between milestones through the API; the HTTP mode is single-user (see below).
+Other limits: no delete (by design); a task cannot be moved between milestones through the API. The multi-user mode keeps its token cache and rate limit in memory: run **one replica**, or put a gateway in front for more.
 
-## Hosting (HTTP mode)
+The multi-user OAuth flow was verified against Zoho (EU) with the [check script](docs/zoho-oauth-check.ps1): discovery, PKCE S256 (enforced), refresh tokens with `access_type=offline`, user-info, and ServiceDesk calls with the user's token. The end-to-end connection from Claude, Microsoft 365 Copilot and Copilot Studio is covered by mocks only so far.
 
-`MCP_TRANSPORT=http` serves stateless Streamable HTTP on `:PORT/mcp`, plus `/healthz`. A `Dockerfile` is included (e.g. Azure Container Apps, any container host); provide the configuration as environment variables or secrets instead of `.env`.
+## Multi-user mode (HTTP) — for a team, Claude and Microsoft Copilot
 
-**This mode still uses the single refresh token from the configuration: everyone who can reach the endpoint acts as that one user.** Do not expose it to other people as is. A multi-user deployment needs:
+`MCP_TRANSPORT=http` turns the server into a shared, hosted service:
 
-1. OAuth at the MCP level, so the client authenticates each user (e.g. against your identity provider),
-2. a Zoho *server-based* client instead of a Self Client, so each user grants access once,
-3. per-user refresh tokens stored encrypted (e.g. a key vault), looked up from the authenticated identity.
+- **Each user signs in with their own ServiceDesk (Zoho) account** — through your SSO if ServiceDesk uses it. The MCP client (Claude, a Microsoft 365 Copilot agent, Copilot Studio) runs the OAuth flow and keeps the user's token; every change in ServiceDesk is made **as that user** and limited by **their** ServiceDesk permissions.
+- **The server stores no tokens and no secrets.** It checks each token once (cached), forwards it to ServiceDesk, and logs every write with the user's e-mail.
+- It publishes standard OAuth discovery documents and a thin **OAuth facade** in front of Zoho, which adds what Zoho needs and MCP clients don't send (`access_type=offline` for refresh tokens, comma-separated scopes) and translates Zoho's error responses.
 
-`src/auth.ts` defines a `TokenProvider` interface as the seam for this; only the single-user provider is implemented.
+```
+ Claude / Copilot ──(user's Zoho token)──► /mcp ──(same token)──► ServiceDesk Plus Cloud
+        │                                    │
+        └──► /oauth/authorize, /oauth/token ─┴──► Zoho accounts (sign-in, via your SSO)
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `/mcp` | MCP (Streamable HTTP, stateless). `401` + `WWW-Authenticate` without a valid token |
+| `/.well-known/oauth-protected-resource[/mcp]` | Protected resource metadata (RFC 9728) |
+| `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | Authorization server metadata (RFC 8414) describing the facade |
+| `/oauth/authorize` | Redirect to Zoho sign-in |
+| `/oauth/token` | Pass-through to Zoho's token endpoint |
+| `/healthz` | Liveness |
+
+Guard-rails in this mode: optional `ALLOWED_EMAIL_DOMAINS` / `ALLOWED_USERS`, per-user rate limit, `SDP_WRITE_PROJECT_IDS` as a server-wide brake on top of ServiceDesk permissions, request size and time limits.
+
+Set-up guides:
+
+- [docs/zoho-client.md](docs/zoho-client.md) — the one Zoho OAuth client all AI clients share, and how to verify it
+- [docs/deploy-azure.md](docs/deploy-azure.md) — Azure Container Apps, custom domain, hardening
+- [docs/clients.md](docs/clients.md) — connect Claude, a Microsoft 365 Copilot declarative agent, and Copilot Studio
 
 ## Development
 
@@ -161,10 +199,10 @@ Other limits: no delete (by design); a task cannot be moved between milestones t
 npm install
 npm run typecheck
 npm run build      # → dist/server.mjs (single bundled file)
-npm test           # builds, then runs the tools against a local mock of Zoho + ServiceDesk
+npm test           # builds, then runs both modes against a local mock of Zoho + ServiceDesk
 ```
 
-Source layout: `src/server.ts` (entry, transports), `src/tools.ts` (tool definitions), `src/sdp.ts` (API client, audit), `src/auth.ts` (tokens), `src/config.ts`, `src/dates.ts`.
+Source layout: `src/server.ts` (entry, transports), `src/http.ts` (multi-user HTTP front end, OAuth facade), `src/tools.ts` (tool definitions), `src/sdp.ts` (API client, audit), `src/auth.ts` (tokens, identity), `src/config.ts`, `src/dates.ts`.
 
 ## Troubleshooting
 

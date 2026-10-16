@@ -379,7 +379,7 @@ export function registerTools(server: McpServer, sdp: SdpClient, cfg: Config): v
 
   async function createTask(a: Json): Promise<Json> {
     const body = await buildTaskOrMilestoneBody(a.project_id, a, "task");
-    body.template = { name: a.template ?? cfg.defaultTaskTemplate };
+    body.template = { name: a.template ?? cfg.taskTemplates[a.project_id] ?? cfg.defaultTaskTemplate };
     const res = await sdp.post(taskPath(a.project_id, a.milestone_id), { task: body });
     const t = res.task as Json;
     sdp.audit({ op: "create_task", project_id: a.project_id, milestone_id: a.milestone_id ?? null, task_id: t?.id, title: a.title });

@@ -21,7 +21,7 @@ export class RefreshTokenProvider implements TokenProvider {
   private inflight?: Promise<string>;
 
   constructor(private cfg: Config) {
-    if (!cfg.refreshToken) throw new Error("Missing required configuration: ZOHO_REFRESH_TOKEN");
+    if (!cfg.refreshToken || !cfg.clientId || !cfg.clientSecret) throw new Error("Missing required configuration: ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET and ZOHO_REFRESH_TOKEN");
   }
 
   invalidate(): void {
@@ -41,8 +41,8 @@ export class RefreshTokenProvider implements TokenProvider {
     const body = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: this.cfg.refreshToken!,
-      client_id: this.cfg.clientId,
-      client_secret: this.cfg.clientSecret,
+      client_id: this.cfg.clientId!,
+      client_secret: this.cfg.clientSecret!,
     });
     const res = await fetch(`${this.cfg.zohoAccountsUrl}/oauth/v2/token`, {
       method: "POST",
@@ -61,4 +61,35 @@ export class RefreshTokenProvider implements TokenProvider {
     this.expiresAt = Date.now() + ttl * 1000;
     return this.token;
   }
+}
+
+/**
+ * Multi-user (HTTP) mode: the MCP client (Claude, Copilot, ...) signs the user in with Zoho
+ * and sends the user's access token on every request. The server stores nothing; it only
+ * forwards the token. Refreshing is the client's job, so invalidate() is a no-op.
+ */
+export class BearerTokenProvider implements TokenProvider {
+  constructor(private token: string) {}
+  async getAccessToken(): Promise<string> {
+    return this.token;
+  }
+  invalidate(): void {}
+}
+
+export interface UserIdentity {
+  email: string;
+  name?: string;
+}
+
+/** Resolve a Zoho access token to the signed-in user (Zoho accounts "user info" endpoint). */
+export async function fetchZohoIdentity(cfg: Config, token: string): Promise<UserIdentity | null> {
+  const res = await fetch(`${cfg.zohoAccountsUrl}/oauth/user/info`, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  if (!res.ok) return null;
+  const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const email = typeof j.Email === "string" ? j.Email : typeof j.email === "string" ? j.email : undefined;
+  if (!email) return null;
+  const name = typeof j.Display_Name === "string" ? j.Display_Name : undefined;
+  return { email: email.toLowerCase(), name };
 }

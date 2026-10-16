@@ -21,6 +21,7 @@ export class SdpClient {
   constructor(
     private cfg: Config,
     private tokens: TokenProvider,
+    private user?: string, // e-mail of the signed-in user (HTTP mode), for the audit trail
   ) {
     this.apiBase = `${cfg.sdpBaseUrl}/app/${encodeURIComponent(cfg.portal)}/api/v3`;
   }
@@ -86,7 +87,7 @@ export class SdpClient {
   }
 
   audit(entry: Json): void {
-    const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...(this.user ? { user: this.user } : {}), ...entry });
     process.stderr.write(`[audit] ${line}\n`);
     if (this.cfg.auditLogPath) {
       try {
