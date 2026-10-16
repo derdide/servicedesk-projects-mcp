@@ -31,6 +31,8 @@ It checks: Zoho's discovery document and PKCE support, the code exchange, that a
 
 Expected result (Zoho EU, October 2026): everything PASS except *Registration endpoint (DCR)*, which Zoho does not offer. That is why each AI client is given the client ID and secret explicitly instead of registering itself.
 
+**After the check, remove `http://localhost:8765/callback`** from the client's redirect URIs: a local process could otherwise receive sign-in codes for your production client.
+
 ## 3. Scopes
 
 The server requests, by default (`ZOHO_SCOPES`):
@@ -44,4 +46,5 @@ The server requests, by default (`ZOHO_SCOPES`):
 
 - Zoho issues a refresh token only when the sign-in carries `access_type=offline`. MCP clients do not send it; the server's `/oauth/authorize` adds it. Configure every client to use the **server's** authorize and token URLs, not Zoho's.
 - Zoho does not rotate refresh tokens. The clients are confidential (they hold the client secret), so this is acceptable under OAuth 2.1.
+- One client secret is copied into each AI platform. If you want to revoke one platform without the others, create one Zoho client per platform; the server then needs one `ZOHO_CLIENT_ID` per deployment (or a small change to accept a list).
 - A user revokes access in Zoho under *My account → Connected apps*; an administrator revokes it for everyone by deleting the client.

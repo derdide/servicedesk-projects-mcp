@@ -46,6 +46,7 @@ export class RefreshTokenProvider implements TokenProvider {
     });
     const res = await fetch(`${this.cfg.zohoAccountsUrl}/oauth/v2/token`, {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
@@ -85,6 +86,7 @@ export interface UserIdentity {
 export async function fetchZohoIdentity(cfg: Config, token: string): Promise<UserIdentity | null> {
   const res = await fetch(`${cfg.zohoAccountsUrl}/oauth/user/info`, {
     headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) return null;
   const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;

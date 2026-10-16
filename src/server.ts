@@ -7,7 +7,7 @@ import { createHttpHandler } from "./http.js";
 import { SdpClient } from "./sdp.js";
 import { registerTools } from "./tools.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 
 const INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
 - Changes are made as the signed-in user and limited by that user's ServiceDesk permissions; the server may further restrict writes to configured projects.
@@ -15,8 +15,8 @@ const INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones
 - Before bulk changes, run sdp_bulk_create_tasks with dry_run=true and show the plan to the user.
 - Task and milestone owners must be project members.`;
 
-function buildServer(cfg: Config, tokens: TokenProvider, user?: string): McpServer {
-  const sdp = new SdpClient(cfg, tokens, user);
+function buildServer(cfg: Config, tokens: TokenProvider, user?: string, onTokenRejected?: () => void): McpServer {
+  const sdp = new SdpClient(cfg, tokens, user, onTokenRejected);
   const server = new McpServer({ name: "servicedesk-projects", version: VERSION }, { instructions: INSTRUCTIONS });
   registerTools(server, sdp, cfg);
   return server;
@@ -26,7 +26,9 @@ async function main() {
   const cfg = loadConfig();
   if (cfg.transport === "http") {
     // Multi-user: each request carries the user's own Zoho token (see src/http.ts).
-    const handler = createHttpHandler(cfg, (token, user) => buildServer(cfg, new BearerTokenProvider(token), user.email));
+    const handler = createHttpHandler(cfg, (token, user, onTokenRejected) =>
+      buildServer(cfg, new BearerTokenProvider(token), user.email, onTokenRejected),
+    );
     const httpServer = createServer(handler);
     httpServer.requestTimeout = 120_000;
     httpServer.headersTimeout = 30_000;

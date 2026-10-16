@@ -45,6 +45,14 @@ export function toEpochMs(input: string, timeZone: string, edge: "start" | "end"
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
   if (!m) throw new Error(`Invalid date "${input}". Use YYYY-MM-DD or YYYY-MM-DDTHH:mm.`);
   const [, y, mo, d, h, mi, sec] = m;
+  // Reject impossible dates instead of letting Date roll them over (2026-02-31 → 3 March).
+  const chk = new Date(Date.UTC(+y, +mo - 1, +d, h ? +h : 0, mi ? +mi : 0, sec ? +sec : 0));
+  if (
+    chk.getUTCFullYear() !== +y || chk.getUTCMonth() !== +mo - 1 || chk.getUTCDate() !== +d ||
+    chk.getUTCHours() !== (h ? +h : 0) || chk.getUTCMinutes() !== (mi ? +mi : 0) || chk.getUTCSeconds() !== (sec ? +sec : 0)
+  ) {
+    throw new Error(`Invalid date "${input}": no such calendar date or time.`);
+  }
   if (h === undefined) {
     return String(
       edge === "start"

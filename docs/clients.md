@@ -43,6 +43,10 @@ Reference: [Build a plugin for a declarative agent from an MCP server](https://l
 
 Reference: [Copilot Developer Camp — MCP with OAuth](https://microsoft.github.io/copilot-camp/pages/make/copilot-studio/10-mcp-oauth/).
 
+## Approvals
+
+Updates are flagged *destructive* in the tool annotations. Wherever the client lets you, require user approval for the write tools (`sdp_create_*`, `sdp_update_*`, `sdp_add_*`, `sdp_bulk_create_tasks` with `dry_run=false`): it is the main protection against instructions hidden in task texts (see the README's *Security model*).
+
 ## What users see
 
 The first time the agent or Claude calls a tool, the user is asked to sign in (Zoho → your SSO) and to approve the scopes. After that, tokens are renewed in the background. Every change appears in ServiceDesk under the user's own name.

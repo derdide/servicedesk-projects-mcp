@@ -10,11 +10,11 @@ LOC=switzerlandnorth
 ACR=<yourregistry>            # globally unique, lowercase
 APP=servicedesk-mcp
 ENV=cae-servicedesk-mcp
-VER=0.5.0
+VER=0.5.1
 
 az group create -n $RG -l $LOC
 az acr create -n $ACR -g $RG --sku Basic
-az acr build -r $ACR -t servicedesk-projects-mcp:$VER .     # uses the Dockerfile in the repository root
+az acr build -r $ACR -t servicedesk-projects-mcp:$VER .     # multi-stage build from source; .dockerignore keeps .env out of the upload
 ```
 
 ## 2. Create the app
@@ -33,14 +33,18 @@ az containerapp create -n $APP -g $RG --environment $ENV \
     PUBLIC_BASE_URL=https://mcp.example.com \
     SDP_BASE_URL=https://sdpondemand.manageengine.eu SDP_PORTAL=itdesk \
     ZOHO_ACCOUNTS_URL=https://accounts.zoho.eu \
+    ZOHO_CLIENT_ID=<client id of the shared Zoho client> \
+    TRUST_PROXY_HOPS=1 \
     SDP_TIMEZONE=Europe/Zurich \
     ALLOWED_EMAIL_DOMAINS=example.com \
     SDP_WRITE_PROJECT_IDS='*'
 ```
 
 - **One replica.** The token-check cache and the rate limit live in memory. For several replicas, put a gateway (e.g. Azure API Management) in front and move rate limiting there.
+- `ZOHO_CLIENT_ID` is not a secret; the client **secret** is not given to the server at all.
+- `TRUST_PROXY_HOPS=1`: Container Apps ingress is one proxy hop, so the per-IP limit uses the real client address.
 - **No secrets** are needed by the server in this mode. If you later add any, use Container Apps secrets backed by Key Vault, not plain environment variables.
-- `SDP_WRITE_PROJECT_IDS='*'` leaves write control to ServiceDesk permissions. Use a list of project ids to restrict writes further.
+- `SDP_WRITE_PROJECT_IDS='*'` leaves write control to ServiceDesk permissions: anything a user may change in ServiceDesk, the AI may change on their behalf. A list of project ids restricts writes further, at the cost of maintaining it. See the README's *Security model*.
 - Optional: `SDP_STREAM_FIELD=udf_char1`, `SDP_TASK_TEMPLATES='{"<project id>":"<template>"}'`.
 
 ## 3. Custom domain (required for Entra-based clients, recommended anyway)
@@ -68,9 +72,10 @@ curl -si -X POST https://mcp.example.com/mcp | head -5                      # 40
 | Only your users | `ALLOWED_EMAIL_DOMAINS` and/or `ALLOWED_USERS`; ServiceDesk SSO puts sign-in behind your identity provider |
 | Least privilege | Zoho scopes without `DELETE`; no delete tool; `SDP_WRITE_PROJECT_IDS` as a brake |
 | Network | Ingress IP restrictions (`az containerapp ingress access-restriction set`). Claude calls from `160.79.104.0/21` ([Anthropic IP ranges](https://platform.claude.com/docs/en/api/ip-addresses)). Microsoft 365 Copilot and Copilot Studio call from Microsoft-managed addresses: determine and test those before enabling an allow-list, or the Copilot side stops working |
-| Abuse | Per-user rate limit (`RATE_LIMIT_PER_MINUTE`), 16 KB limit on OAuth bodies, request timeouts |
+| Abuse | Per-user and per-IP rate limits, no JSON-RPC batches, 256 KB on `/mcp`, 16 KB on OAuth bodies, cached rejection of bad tokens, inbound and outbound timeouts |
+| OAuth facade | Only `ZOHO_CLIENT_ID` is accepted on `/oauth/authorize` and `/oauth/token`, so your domain cannot front other Zoho apps' consent screens |
 | Audit | Container logs → Log Analytics. Every write is one `[audit]` JSON line with the user's e-mail |
-| Supply chain | Rebuild on dependency updates; scan the image (e.g. Defender for Containers); pin the image tag |
+| Supply chain | The image is built from source in a multi-stage build; Dependabot and the CI workflow (`npm audit`, tests, dist-matches-source check) are in `.github/`; scan the image (e.g. Defender for Containers); pin the image tag, and optionally the base image digest |
 | Revocation | Per user: Zoho *Connected apps*. Everyone: delete the Zoho client, or stop the container app |
 
 ## 6. Update

@@ -4633,8 +4633,8 @@ var require_core = __commonJS({
         for (const jsonPointer of keywordsJsonPointers) {
           const segments = jsonPointer.split("/").slice(1);
           let keywords = metaSchema;
-          for (const seg of segments)
-            keywords = keywords[seg];
+          for (const seg2 of segments)
+            keywords = keywords[seg2];
           for (const key in rules) {
             const rule = rules[key];
             if (typeof rule != "object")
@@ -12648,18 +12648,18 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path) {
-    if (typeof seg === "number")
-      segs.push(`[${seg}]`);
-    else if (typeof seg === "symbol")
-      segs.push(`[${JSON.stringify(String(seg))}]`);
-    else if (/[^\w$]/.test(seg))
-      segs.push(`[${JSON.stringify(seg)}]`);
+  const path = _path.map((seg2) => typeof seg2 === "object" ? seg2.key : seg2);
+  for (const seg2 of path) {
+    if (typeof seg2 === "number")
+      segs.push(`[${seg2}]`);
+    else if (typeof seg2 === "symbol")
+      segs.push(`[${JSON.stringify(String(seg2))}]`);
+    else if (/[^\w$]/.test(seg2))
+      segs.push(`[${JSON.stringify(seg2)}]`);
     else {
       if (segs.length)
         segs.push(".");
-      segs.push(seg);
+      segs.push(seg2);
     }
   }
   return segs.join("");
@@ -28168,14 +28168,14 @@ function getDotPath(path) {
   if (path.length === 0) {
     return "object root";
   }
-  return path.reduce((acc, seg, index) => {
+  return path.reduce((acc, seg2, index) => {
     if (index === 0) {
-      return String(seg);
+      return String(seg2);
     }
-    if (typeof seg === "number") {
-      return `${acc}[${seg}]`;
+    if (typeof seg2 === "number") {
+      return `${acc}[${seg2}]`;
     }
-    return `${acc}.${seg}`;
+    return `${acc}.${seg2}`;
   }, "");
 }
 function getParseErrorMessage(error62) {
@@ -36622,6 +36622,15 @@ function req(name) {
   if (!v) throw new Error(`Missing required configuration: ${name}`);
   return v;
 }
+function num(name, def, min, max) {
+  const raw = process.env[name];
+  if (raw === void 0 || raw === "") return def;
+  const v = Number(raw);
+  if (!Number.isInteger(v) || v < min || v > max) {
+    throw new Error(`Invalid configuration: ${name}=${JSON.stringify(raw)} (expected an integer between ${min} and ${max})`);
+  }
+  return v;
+}
 function list(name) {
   return (process.env[name] ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 }
@@ -36636,6 +36645,18 @@ function jsonMap(name) {
   throw new Error(`${name} must be a JSON object, e.g. {"123456":"My template"}`);
 }
 function loadConfig() {
+  const cfg = buildConfig();
+  if (cfg.transport === "http" && !cfg.allowAnyZohoUser && !cfg.allowedEmailDomains.length && !cfg.allowedUsers.length) {
+    throw new Error(
+      "Refusing to start: in HTTP mode set ALLOWED_EMAIL_DOMAINS and/or ALLOWED_USERS (or ALLOW_ANY_ZOHO_USER=true to accept any Zoho account \u2014 not recommended)."
+    );
+  }
+  if (cfg.transport === "http" && !/^https?:\/\/[^/]+$/.test(cfg.publicBaseUrl ?? "")) {
+    throw new Error("Invalid configuration: PUBLIC_BASE_URL must be scheme://host[:port] without a path");
+  }
+  return cfg;
+}
+function buildConfig() {
   const writeRaw = (process.env.SDP_WRITE_PROJECT_IDS ?? "").trim();
   const transport = process.env.MCP_TRANSPORT ?? "stdio";
   const single = transport !== "http";
@@ -36643,7 +36664,8 @@ function loadConfig() {
     sdpBaseUrl: req("SDP_BASE_URL").replace(/\/+$/, ""),
     portal: req("SDP_PORTAL"),
     zohoAccountsUrl: (process.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.com").replace(/\/+$/, ""),
-    clientId: single ? req("ZOHO_CLIENT_ID") : process.env.ZOHO_CLIENT_ID,
+    clientId: req("ZOHO_CLIENT_ID"),
+    // HTTP mode: the only Zoho client the OAuth facade accepts
     clientSecret: single ? req("ZOHO_CLIENT_SECRET") : process.env.ZOHO_CLIENT_SECRET,
     refreshToken: process.env.ZOHO_REFRESH_TOKEN,
     writeProjectIds: writeRaw === "*" ? "*" : new Set(
@@ -36660,8 +36682,13 @@ function loadConfig() {
     zohoScopes: (process.env.ZOHO_SCOPES ?? "SDPOnDemand.projects.READ,SDPOnDemand.projects.CREATE,SDPOnDemand.projects.UPDATE,AaaServer.profile.READ").split(/[ ,]+/).filter(Boolean),
     allowedEmailDomains: list("ALLOWED_EMAIL_DOMAINS").map((d) => d.replace(/^@/, "")),
     allowedUsers: list("ALLOWED_USERS"),
-    rateLimitPerMinute: Number(process.env.RATE_LIMIT_PER_MINUTE ?? 120),
-    tokenCacheSeconds: Number(process.env.TOKEN_CACHE_SECONDS ?? 300)
+    allowAnyZohoUser: process.env.ALLOW_ANY_ZOHO_USER === "true",
+    rateLimitPerMinute: num("RATE_LIMIT_PER_MINUTE", 120, 1, 1e5),
+    ipRateLimitPerMinute: num("IP_RATE_LIMIT_PER_MINUTE", 300, 1, 1e5),
+    tokenCacheSeconds: num("TOKEN_CACHE_SECONDS", 60, 0, 3600),
+    trustProxyHops: num("TRUST_PROXY_HOPS", 0, 0, 5),
+    allowedOrigins: list("ALLOWED_ORIGINS"),
+    sdpTimeoutMs: num("SDP_TIMEOUT_SECONDS", 45, 5, 300) * 1e3
   };
 }
 
@@ -36695,6 +36722,7 @@ var RefreshTokenProvider = class {
     });
     const res = await fetch(`${this.cfg.zohoAccountsUrl}/oauth/v2/token`, {
       method: "POST",
+      signal: AbortSignal.timeout(15e3),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body
     });
@@ -36723,7 +36751,8 @@ var BearerTokenProvider = class {
 };
 async function fetchZohoIdentity(cfg, token) {
   const res = await fetch(`${cfg.zohoAccountsUrl}/oauth/user/info`, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` }
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    signal: AbortSignal.timeout(15e3)
   });
   if (!res.ok) return null;
   const j = await res.json().catch(() => ({}));
@@ -38839,7 +38868,9 @@ var StreamableHTTPServerTransport = class {
 };
 
 // src/http.ts
-var MAX_BODY = 16 * 1024;
+var MAX_OAUTH_BODY = 16 * 1024;
+var MAX_MCP_BODY = 256 * 1024;
+var NEGATIVE_CACHE_MS = 6e4;
 function send(res, status, body, headers = {}) {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, {
@@ -38849,12 +38880,12 @@ function send(res, status, body, headers = {}) {
   });
   res.end(text);
 }
-async function readBody(req2) {
+async function readBody(req2, max = MAX_OAUTH_BODY) {
   let size = 0;
   const chunks = [];
   for await (const chunk of req2) {
     size += chunk.length;
-    if (size > MAX_BODY) throw Object.assign(new Error("Request body too large"), { status: 413 });
+    if (size > max) throw Object.assign(new Error("Request body too large"), { status: 413 });
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -38865,6 +38896,8 @@ function createHttpHandler(cfg, makeServer) {
   const prmUrl = `${base}/.well-known/oauth-protected-resource/mcp`;
   const zohoAuthorize = `${cfg.zohoAccountsUrl}/oauth/v2/auth`;
   const zohoToken = `${cfg.zohoAccountsUrl}/oauth/v2/token`;
+  const publicHost = new URL(base).host;
+  const okOrigins = /* @__PURE__ */ new Set([new URL(base).origin, ...cfg.allowedOrigins]);
   const prm = {
     resource,
     authorization_servers: [base],
@@ -38884,17 +38917,20 @@ function createHttpHandler(cfg, makeServer) {
   };
   const identityCache = /* @__PURE__ */ new Map();
   const hits = /* @__PURE__ */ new Map();
+  const ipHits = /* @__PURE__ */ new Map();
+  const tokenKey = (token2) => createHash("sha256").update(token2).digest("hex");
+  function prune() {
+    const now = Date.now();
+    for (const [k, v] of identityCache) if (v.exp <= now) identityCache.delete(k);
+    for (const m of [hits, ipHits]) for (const [k, v] of m) if (now - v.windowStart >= 6e4) m.delete(k);
+  }
+  setInterval(prune, 6e4).unref();
   async function identify(token2) {
-    const key = createHash("sha256").update(token2).digest("hex");
+    const key = tokenKey(token2);
     const hit = identityCache.get(key);
     if (hit && hit.exp > Date.now()) return hit.user;
-    const user2 = await fetchZohoIdentity(cfg, token2);
-    if (user2) {
-      identityCache.set(key, { user: user2, exp: Date.now() + cfg.tokenCacheSeconds * 1e3 });
-      if (identityCache.size > 5e3) {
-        for (const [k, v] of identityCache) if (v.exp <= Date.now()) identityCache.delete(k);
-      }
-    }
+    const user2 = await fetchZohoIdentity(cfg, token2).catch(() => null);
+    identityCache.set(key, { user: user2, exp: Date.now() + (user2 ? cfg.tokenCacheSeconds * 1e3 : NEGATIVE_CACHE_MS) });
     return user2;
   }
   function allowed(user2) {
@@ -38902,15 +38938,21 @@ function createHttpHandler(cfg, makeServer) {
     if (cfg.allowedEmailDomains.length) return cfg.allowedEmailDomains.includes(user2.email.split("@")[1] ?? "");
     return cfg.allowedUsers.length === 0;
   }
-  function rateLimited(email3) {
+  function over(map2, key, limit) {
     const now = Date.now();
-    const h = hits.get(email3);
+    const h = map2.get(key);
     if (!h || now - h.windowStart >= 6e4) {
-      hits.set(email3, { windowStart: now, count: 1 });
+      map2.set(key, { windowStart: now, count: 1 });
       return false;
     }
     h.count++;
-    return h.count > cfg.rateLimitPerMinute;
+    return h.count > limit;
+  }
+  function clientIp(req2) {
+    const sock = req2.socket.remoteAddress ?? "unknown";
+    if (!cfg.trustProxyHops) return sock;
+    const xff = String(req2.headers["x-forwarded-for"] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+    return xff[xff.length - cfg.trustProxyHops] ?? sock;
   }
   function unauthorized(res, error62) {
     const parts = [`Bearer resource_metadata="${prmUrl}"`, `scope="${cfg.zohoScopes.join(" ")}"`];
@@ -38918,6 +38960,9 @@ function createHttpHandler(cfg, makeServer) {
     send(res, 401, { error: error62 ?? "unauthorized" }, { "WWW-Authenticate": parts.join(", ") });
   }
   function authorize(url2, res) {
+    if (url2.searchParams.get("client_id") !== cfg.clientId) {
+      return send(res, 400, { error: "invalid_client", error_description: "Unknown client_id" });
+    }
     const out = new URLSearchParams();
     for (const [k, v] of url2.searchParams) {
       if (k === "resource") continue;
@@ -38935,12 +38980,25 @@ function createHttpHandler(cfg, makeServer) {
     body.delete("resource");
     const auth = req2.headers.authorization;
     if (auth?.startsWith("Basic ")) {
-      const [id, secret] = Buffer.from(auth.slice(6), "base64").toString("utf8").split(":");
-      if (id && !body.has("client_id")) body.set("client_id", decodeURIComponent(id));
-      if (secret && !body.has("client_secret")) body.set("client_secret", decodeURIComponent(secret));
+      if (body.has("client_secret")) {
+        return send(res, 400, { error: "invalid_request", error_description: "Use either HTTP Basic or form credentials, not both" });
+      }
+      const raw = Buffer.from(auth.slice(6), "base64").toString("utf8");
+      const i = raw.indexOf(":");
+      try {
+        if (i < 0) throw new Error("no separator");
+        body.set("client_id", decodeURIComponent(raw.slice(0, i)));
+        body.set("client_secret", decodeURIComponent(raw.slice(i + 1)));
+      } catch {
+        return send(res, 401, { error: "invalid_client" }, { "WWW-Authenticate": 'Basic realm="token"' });
+      }
+    }
+    if (body.get("client_id") !== cfg.clientId) {
+      return send(res, 401, { error: "invalid_client", error_description: "Unknown client_id" });
     }
     const upstream = await fetch(zohoToken, {
       method: "POST",
+      signal: AbortSignal.timeout(15e3),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body
     });
@@ -38954,6 +39012,9 @@ function createHttpHandler(cfg, makeServer) {
     send(res, 200, json3);
   }
   async function mcp(req2, res) {
+    if (req2.headers.host && req2.headers.host !== publicHost) return send(res, 403, { error: "invalid_host" });
+    const origin = req2.headers.origin;
+    if (origin && !okOrigins.has(origin)) return send(res, 403, { error: "invalid_origin" });
     const h = req2.headers.authorization ?? "";
     const m = h.match(/^(?:Bearer|Zoho-oauthtoken)\s+(.+)$/i);
     if (!m) return unauthorized(res);
@@ -38961,21 +39022,35 @@ function createHttpHandler(cfg, makeServer) {
     const user2 = await identify(tok);
     if (!user2) return unauthorized(res, "invalid_token");
     if (!allowed(user2)) return send(res, 403, { error: "forbidden", error_description: `${user2.email} is not allowed to use this server` });
-    if (rateLimited(user2.email)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
-    const server = makeServer(tok, user2);
+    if (over(hits, user2.email, cfg.rateLimitPerMinute)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
+    let parsed;
+    if (req2.method === "POST") {
+      const raw = await readBody(req2, MAX_MCP_BODY);
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return send(res, 400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
+      }
+      if (Array.isArray(parsed)) {
+        return send(res, 400, { jsonrpc: "2.0", error: { code: -32600, message: "Batch requests are not supported" }, id: null });
+      }
+    }
+    const key = tokenKey(tok);
+    const server = makeServer(tok, user2, () => identityCache.delete(key));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: void 0 });
     res.on("close", () => {
       transport.close();
       server.close();
     });
     await server.connect(transport);
-    await transport.handleRequest(req2, res);
+    await transport.handleRequest(req2, res, parsed);
   }
   return async function handle(req2, res) {
     try {
       const url2 = new URL(req2.url ?? "/", base);
       const p = url2.pathname.replace(/\/+$/, "") || "/";
       if (p === "/healthz") return send(res, 200, "ok");
+      if (over(ipHits, clientIp(req2), cfg.ipRateLimitPerMinute)) return send(res, 429, { error: "rate_limited" }, { "Retry-After": "60" });
       if (req2.method === "GET" && (p === "/.well-known/oauth-protected-resource" || p === "/.well-known/oauth-protected-resource/mcp"))
         return send(res, 200, prm);
       if (req2.method === "GET" && (p.startsWith("/.well-known/oauth-authorization-server") || p.startsWith("/.well-known/openid-configuration")))
@@ -38986,7 +39061,8 @@ function createHttpHandler(cfg, makeServer) {
       return send(res, 404, { error: "not_found" });
     } catch (e) {
       const status = e.status ?? 500;
-      process.stderr.write(`[http] ${req2.method} ${req2.url} failed: ${e.message}
+      const path = (req2.url ?? "").split("?")[0];
+      process.stderr.write(`[http] ${req2.method} ${path} failed: ${e.message}
 `);
       if (!res.headersSent) send(res, status, { error: status === 413 ? "payload_too_large" : "server_error" });
     }
@@ -39005,15 +39081,17 @@ var SdpError = class extends Error {
   body;
 };
 var SdpClient = class {
-  constructor(cfg, tokens, user2) {
+  constructor(cfg, tokens, user2, onTokenRejected) {
     this.cfg = cfg;
     this.tokens = tokens;
     this.user = user2;
+    this.onTokenRejected = onTokenRejected;
     this.apiBase = `${cfg.sdpBaseUrl}/app/${encodeURIComponent(cfg.portal)}/api/v3`;
   }
   cfg;
   tokens;
   user;
+  onTokenRejected;
   apiBase;
   async get(path, inputData) {
     const qs = inputData ? `?input_data=${encodeURIComponent(JSON.stringify(inputData))}` : "";
@@ -39043,6 +39121,10 @@ var SdpClient = class {
     return out.slice(0, max);
   }
   async call(method, path, inputData, retried = false) {
+    const [pathname, query] = path.split("?", 2);
+    if (!/^\/[A-Za-z0-9_/]+$/.test(pathname) || pathname.includes("//") || query !== void 0 && !query.startsWith("input_data=")) {
+      throw new SdpError(`Refused unsafe ServiceDesk path`, 400, { path: pathname.slice(0, 80) });
+    }
     const token = await this.tokens.getAccessToken();
     const init = {
       method,
@@ -39053,7 +39135,7 @@ var SdpClient = class {
       },
       ...inputData ? { body: new URLSearchParams({ input_data: JSON.stringify(inputData) }) } : {}
     };
-    const res = await fetch(this.apiBase + path, init);
+    const res = await fetch(this.apiBase + path, { ...init, signal: AbortSignal.timeout(this.cfg.sdpTimeoutMs) });
     const text = await res.text();
     let json3 = {};
     try {
@@ -39061,9 +39143,15 @@ var SdpClient = class {
     } catch {
       json3 = { raw: text.slice(0, 2e3) };
     }
-    if (res.status === 401 && !retried) {
-      this.tokens.invalidate();
-      return this.call(method, path, inputData, true);
+    if (res.status === 401) {
+      if (this.onTokenRejected) {
+        this.onTokenRejected();
+        throw new SdpError("ServiceDesk rejected your access token (expired or revoked). Please retry; if it persists, reconnect / sign in again.", 401, json3);
+      }
+      if (!retried) {
+        this.tokens.invalidate();
+        return this.call(method, path, inputData, true);
+      }
     }
     if (!res.ok) {
       throw new SdpError(`ServiceDesk ${method} ${path} failed (HTTP ${res.status}): ${JSON.stringify(json3).slice(0, 1500)}`, res.status, json3);
@@ -39120,6 +39208,10 @@ function toEpochMs(input2, timeZone, edge = "start") {
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
   if (!m) throw new Error(`Invalid date "${input2}". Use YYYY-MM-DD or YYYY-MM-DDTHH:mm.`);
   const [, y, mo, d, h, mi, sec] = m;
+  const chk = new Date(Date.UTC(+y, +mo - 1, +d, h ? +h : 0, mi ? +mi : 0, sec ? +sec : 0));
+  if (chk.getUTCFullYear() !== +y || chk.getUTCMonth() !== +mo - 1 || chk.getUTCDate() !== +d || chk.getUTCHours() !== (h ? +h : 0) || chk.getUTCMinutes() !== (mi ? +mi : 0) || chk.getUTCSeconds() !== (sec ? +sec : 0)) {
+    throw new Error(`Invalid date "${input2}": no such calendar date or time.`);
+  }
   if (h === void 0) {
     return String(
       edge === "start" ? wallToEpoch(+y, +mo, +d, 0, 0, 0, 0, timeZone) : wallToEpoch(+y, +mo, +d, 23, 59, 59, 999, timeZone)
@@ -39206,8 +39298,26 @@ function makeShapers(tz, streamField) {
 function ok(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
+function failWrite(sdp, op, a, e) {
+  sdp.audit({
+    op,
+    outcome: e.refused ? "refused" : "failed",
+    project_id: a.project_id ?? null,
+    milestone_id: a.milestone_id ?? null,
+    task_id: a.task_id ?? null,
+    error: (e.message ?? String(e)).slice(0, 300)
+  });
+  return fail(e);
+}
 function fail(e) {
   return { isError: true, content: [{ type: "text", text: e.message ?? String(e) }] };
+}
+var ID_RE = /^\d{1,20}$/;
+var idSchema = external_exports.string().regex(ID_RE, "must be a numeric ServiceDesk id");
+function seg(id) {
+  const v = String(id ?? "");
+  if (!ID_RE.test(v)) throw new Error(`Invalid ServiceDesk id: ${JSON.stringify(v).slice(0, 40)}`);
+  return encodeURIComponent(v);
 }
 var dateStr = external_exports.string().describe("YYYY-MM-DD (or YYYY-MM-DDTHH:mm), interpreted in the server timezone (SDP_TIMEZONE)");
 var taskFields = {
@@ -39242,16 +39352,16 @@ function registerTools(server, sdp, cfg) {
   const assertWritable = (projectId) => {
     if (cfg.writeProjectIds === "*") return;
     if (!cfg.writeProjectIds.has(projectId)) {
-      throw new Error(
-        `Write refused: project ${projectId} is not in SDP_WRITE_PROJECT_IDS. Allowed: ${[...cfg.writeProjectIds].join(", ") || "(none \u2014 server is read-only)"}.`
-      );
+      throw Object.assign(new Error(`Write refused: project ${projectId} is not writable through this server.`), {
+        refused: true
+      });
     }
   };
   const memberCache = /* @__PURE__ */ new Map();
   async function resolveOwner(projectId, email3) {
     let entry = memberCache.get(projectId);
     if (!entry || Date.now() - entry.at > 5 * 6e4) {
-      const members2 = await sdp.listAll(`/projects/${projectId}/project_members`, "project_members");
+      const members2 = await sdp.listAll(`/projects/${seg(projectId)}/project_members`, "project_members");
       const byEmail = /* @__PURE__ */ new Map();
       for (const m of members2) if (m.user?.email_id) byEmail.set(String(m.user.email_id).toLowerCase(), m.user);
       entry = { at: Date.now(), byEmail };
@@ -39291,9 +39401,24 @@ function registerTools(server, sdp, cfg) {
     }
     return b;
   }
-  const taskPath = (projectId, milestoneId) => milestoneId ? `/projects/${projectId}/milestones/${milestoneId}/tasks` : `/projects/${projectId}/tasks`;
+  const taskPath = (projectId, milestoneId) => milestoneId ? `/projects/${seg(projectId)}/milestones/${seg(milestoneId)}/tasks` : `/projects/${seg(projectId)}/tasks`;
+  function beforeImage(rec, body) {
+    const out = {};
+    for (const k of Object.keys(body)) {
+      const v = rec?.[k];
+      out[k] = v && typeof v === "object" ? v.name ?? v.value ?? v : v ?? null;
+    }
+    return out;
+  }
+  function assertSameProject(rec, projectId, what) {
+    const pid = rec?.project?.id;
+    if (pid !== void 0 && pid !== null && String(pid) !== projectId) {
+      throw Object.assign(new Error(`Write refused: ${what} belongs to project ${pid}, not ${projectId}.`), { refused: true });
+    }
+  }
   const RO = { readOnlyHint: true, openWorldHint: true };
   const RW = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+  const RW_UPDATE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true };
   server.registerTool(
     "sdp_list_projects",
     {
@@ -39317,12 +39442,12 @@ function registerTools(server, sdp, cfg) {
     {
       title: "Get project",
       description: "Get one project with its full description.",
-      inputSchema: { project_id: external_exports.string() },
+      inputSchema: { project_id: idSchema },
       annotations: RO
     },
     async ({ project_id }) => {
       try {
-        const res = await sdp.get(`/projects/${project_id}`);
+        const res = await sdp.get(`/projects/${seg(project_id)}`);
         return ok(shape.project(res.project));
       } catch (e) {
         return fail(e);
@@ -39334,12 +39459,12 @@ function registerTools(server, sdp, cfg) {
     {
       title: "List project members",
       description: "List members of a project with their project role. Task/milestone owners must be members.",
-      inputSchema: { project_id: external_exports.string() },
+      inputSchema: { project_id: idSchema },
       annotations: RO
     },
     async ({ project_id }) => {
       try {
-        const list2 = await sdp.listAll(`/projects/${project_id}/project_members`, "project_members");
+        const list2 = await sdp.listAll(`/projects/${seg(project_id)}/project_members`, "project_members");
         return ok(list2.map((m) => ({ member_id: m.id, role: m.role?.name, active: m.is_active, user: user(m.user) })));
       } catch (e) {
         return fail(e);
@@ -39351,12 +39476,12 @@ function registerTools(server, sdp, cfg) {
     {
       title: "List milestones",
       description: "List all milestones of a project, in order.",
-      inputSchema: { project_id: external_exports.string() },
+      inputSchema: { project_id: idSchema },
       annotations: RO
     },
     async ({ project_id }) => {
       try {
-        const list2 = await sdp.listAll(`/projects/${project_id}/milestones`, "milestones");
+        const list2 = await sdp.listAll(`/projects/${seg(project_id)}/milestones`, "milestones");
         return ok(list2.map(shape.milestone).sort((a, b) => (a.index ?? 0) - (b.index ?? 0)));
       } catch (e) {
         return fail(e);
@@ -39369,8 +39494,8 @@ function registerTools(server, sdp, cfg) {
       title: "List tasks",
       description: "List tasks of a project (includes milestone tasks), or only the tasks of one milestone. Use include_description=false for compact overviews.",
       inputSchema: {
-        project_id: external_exports.string(),
-        milestone_id: external_exports.string().optional(),
+        project_id: idSchema,
+        milestone_id: idSchema.optional(),
         include_description: external_exports.boolean().default(false),
         max: external_exports.number().int().min(1).max(1e3).default(500)
       },
@@ -39391,12 +39516,12 @@ function registerTools(server, sdp, cfg) {
     {
       title: "Get task",
       description: "Get one task. Pass milestone_id if the task belongs to a milestone (it is shown in sdp_list_tasks).",
-      inputSchema: { project_id: external_exports.string(), task_id: external_exports.string(), milestone_id: external_exports.string().optional() },
+      inputSchema: { project_id: idSchema, task_id: idSchema, milestone_id: idSchema.optional() },
       annotations: RO
     },
     async ({ project_id, task_id, milestone_id }) => {
       try {
-        const res = await sdp.get(`${taskPath(project_id, milestone_id)}/${task_id}`);
+        const res = await sdp.get(`${taskPath(project_id, milestone_id)}/${seg(task_id)}`);
         return ok(shape.task(res.task));
       } catch (e) {
         return fail(e);
@@ -39408,7 +39533,7 @@ function registerTools(server, sdp, cfg) {
     {
       title: "List comments",
       description: "List comments on a project (project_id only), a milestone (+milestone_id), a project task (+task_id) or a milestone task (+milestone_id +task_id).",
-      inputSchema: { project_id: external_exports.string(), milestone_id: external_exports.string().optional(), task_id: external_exports.string().optional() },
+      inputSchema: { project_id: idSchema, milestone_id: idSchema.optional(), task_id: idSchema.optional() },
       annotations: RO
     },
     async ({ project_id, milestone_id, task_id }) => {
@@ -39427,19 +39552,19 @@ function registerTools(server, sdp, cfg) {
     {
       title: "Create milestone",
       description: "Create a milestone in a project. Only allowed for projects listed in SDP_WRITE_PROJECT_IDS.",
-      inputSchema: { project_id: external_exports.string(), title: external_exports.string(), ...milestoneFields },
+      inputSchema: { project_id: idSchema, title: external_exports.string(), ...milestoneFields },
       annotations: RW
     },
     async (a) => {
       try {
         assertWritable(a.project_id);
         const body = await buildTaskOrMilestoneBody(a.project_id, a, "milestone");
-        const res = await sdp.post(`/projects/${a.project_id}/milestones`, { milestone: body });
+        const res = await sdp.post(`/projects/${seg(a.project_id)}/milestones`, { milestone: body });
         const m = res.milestone;
-        sdp.audit({ op: "create_milestone", project_id: a.project_id, milestone_id: m?.id, fields: Object.keys(body) });
+        sdp.audit({ op: "create_milestone", outcome: "ok", project_id: a.project_id, milestone_id: m?.id, fields: Object.keys(body) });
         return ok(shape.milestone(m));
       } catch (e) {
-        return fail(e);
+        return failWrite(sdp, "create_milestone", a, e);
       }
     }
   );
@@ -39448,19 +39573,29 @@ function registerTools(server, sdp, cfg) {
     {
       title: "Update milestone",
       description: "Update fields of an existing milestone. Only the fields you pass are changed.",
-      inputSchema: { project_id: external_exports.string(), milestone_id: external_exports.string(), title: external_exports.string().optional(), ...milestoneFields },
-      annotations: { ...RW, idempotentHint: true }
+      inputSchema: { project_id: idSchema, milestone_id: idSchema, title: external_exports.string().optional(), ...milestoneFields },
+      annotations: RW_UPDATE
     },
     async (a) => {
       try {
         assertWritable(a.project_id);
         const body = await buildTaskOrMilestoneBody(a.project_id, a, "milestone");
         if (!Object.keys(body).length) throw new Error("Nothing to update.");
-        const res = await sdp.put(`/projects/${a.project_id}/milestones/${a.milestone_id}`, { milestone: body });
-        sdp.audit({ op: "update_milestone", project_id: a.project_id, milestone_id: a.milestone_id, fields: Object.keys(body) });
+        const path = `/projects/${seg(a.project_id)}/milestones/${seg(a.milestone_id)}`;
+        const current = (await sdp.get(path)).milestone ?? {};
+        assertSameProject(current, a.project_id, `milestone ${a.milestone_id}`);
+        const res = await sdp.put(path, { milestone: body });
+        sdp.audit({
+          op: "update_milestone",
+          outcome: "ok",
+          project_id: a.project_id,
+          milestone_id: a.milestone_id,
+          fields: Object.keys(body),
+          before: beforeImage(current, body)
+        });
         return ok(shape.milestone(res.milestone));
       } catch (e) {
-        return fail(e);
+        return failWrite(sdp, "update_milestone", a, e);
       }
     }
   );
@@ -39469,7 +39604,15 @@ function registerTools(server, sdp, cfg) {
     body.template = { name: a.template ?? cfg.taskTemplates[a.project_id] ?? cfg.defaultTaskTemplate };
     const res = await sdp.post(taskPath(a.project_id, a.milestone_id), { task: body });
     const t = res.task;
-    sdp.audit({ op: "create_task", project_id: a.project_id, milestone_id: a.milestone_id ?? null, task_id: t?.id, title: a.title });
+    sdp.audit({
+      op: "create_task",
+      outcome: "ok",
+      project_id: t?.project?.id ?? a.project_id,
+      milestone_id: a.milestone_id ?? null,
+      task_id: t?.id,
+      title: a.title,
+      ...a.batch_id ? { batch_id: a.batch_id } : {}
+    });
     return shape.task(t);
   }
   server.registerTool(
@@ -39478,8 +39621,8 @@ function registerTools(server, sdp, cfg) {
       title: "Create task",
       description: "Create a task in a project, under a milestone if milestone_id is given (recommended). Owner must be a project member.",
       inputSchema: {
-        project_id: external_exports.string(),
-        milestone_id: external_exports.string().optional(),
+        project_id: idSchema,
+        milestone_id: idSchema.optional(),
         title: external_exports.string(),
         template: external_exports.string().optional().describe('Task template name; defaults to "Default Task"'),
         ...taskFields
@@ -39491,7 +39634,7 @@ function registerTools(server, sdp, cfg) {
         assertWritable(a.project_id);
         return ok(await createTask(a));
       } catch (e) {
-        return fail(e);
+        return failWrite(sdp, "create_task", a, e);
       }
     }
   );
@@ -39501,26 +39644,26 @@ function registerTools(server, sdp, cfg) {
       title: "Bulk create tasks",
       description: "Create many tasks at once (e.g. a work breakdown under several milestones). Each task names its milestone by milestone_id or exact milestone_title. dry_run=true (default) validates and returns the plan without creating anything \u2014 always show the dry run to the user before running with dry_run=false. Tasks may declare predecessors with depends_on (batch keys or existing task ids); dependencies are created after the tasks.",
       inputSchema: {
-        project_id: external_exports.string(),
+        project_id: idSchema,
         dry_run: external_exports.boolean().default(true),
         tasks: external_exports.array(
           external_exports.object({
             title: external_exports.string(),
-            milestone_id: external_exports.string().optional(),
+            milestone_id: idSchema.optional(),
             milestone_title: external_exports.string().optional(),
             template: external_exports.string().optional(),
-            key: external_exports.string().optional().describe('Short local reference (e.g. "T3") so other tasks in this batch can depend on it'),
+            key: external_exports.string().regex(/^[A-Za-z0-9_-]{1,40}$/, "letters, digits, - and _ only").optional().describe('Short local reference (e.g. "T3") so other tasks in this batch can depend on it'),
             depends_on: external_exports.array(external_exports.string()).optional().describe("Predecessors: keys of tasks in this batch, or ids of existing tasks. This task starts after them."),
             ...taskFields
           })
-        ).min(1).max(200)
+        ).min(1).max(50).describe("At most 50 tasks per call; split larger breakdowns into several calls")
       },
       annotations: RW
     },
-    async ({ project_id, dry_run, tasks }) => {
+    async ({ project_id, dry_run, tasks }, extra) => {
       try {
         assertWritable(project_id);
-        const milestones = await sdp.listAll(`/projects/${project_id}/milestones`, "milestones");
+        const milestones = await sdp.listAll(`/projects/${seg(project_id)}/milestones`, "milestones");
         const byTitle = new Map(milestones.map((m) => [String(m.title).trim().toLowerCase(), String(m.id)]));
         const ids = new Set(milestones.map((m) => String(m.id)));
         const plan = [];
@@ -39528,10 +39671,11 @@ function registerTools(server, sdp, cfg) {
         const keys = new Set(tasks.map((t) => t.key).filter(Boolean));
         if (keys.size !== tasks.filter((t) => t.key).length) problems.push("Duplicate task keys in batch");
         const needExisting = tasks.some((t) => (t.depends_on ?? []).some((d) => !keys.has(d)));
-        const existingIds = needExisting ? new Set((await sdp.listAll(`/projects/${project_id}/tasks`, "tasks")).map((t) => String(t.id))) : /* @__PURE__ */ new Set();
+        const existingIds = needExisting ? new Set((await sdp.listAll(`/projects/${seg(project_id)}/tasks`, "tasks")).map((t) => String(t.id))) : /* @__PURE__ */ new Set();
         for (const [i, t] of tasks.entries()) {
           for (const d of t.depends_on ?? []) {
-            if (!keys.has(d) && !existingIds.has(d)) problems.push(`#${i + 1} "${t.title}": predecessor "${d}" is neither a batch key nor an existing task id`);
+            if (!keys.has(d) && !ID_RE.test(d)) problems.push(`#${i + 1} "${t.title}": predecessor "${d}" is neither a batch key nor a numeric task id`);
+            else if (!keys.has(d) && !existingIds.has(d)) problems.push(`#${i + 1} "${t.title}": predecessor "${d}" is neither a batch key nor an existing task id`);
             if (d === t.key) problems.push(`#${i + 1} "${t.title}": depends on itself`);
           }
           let mid = t.milestone_id;
@@ -39545,18 +39689,23 @@ function registerTools(server, sdp, cfg) {
               problems.push(`#${i + 1} "${t.title}": ${e.message}`);
             }
           }
-          for (const k of ["scheduled_start", "scheduled_end"]) {
+          const epoch = {};
+          for (const k of ["scheduled_start", "scheduled_end", "actual_start", "actual_end"]) {
             if (t[k]) {
               try {
-                toEpochMs(t[k], tz);
+                epoch[k] = Number(toEpochMs(t[k], tz, k.endsWith("end") ? "end" : "start"));
               } catch (e) {
-                problems.push(`#${i + 1} "${t.title}": ${e.message}`);
+                problems.push(`#${i + 1} "${t.title}" ${k}: ${e.message}`);
               }
             }
           }
-          if (t.scheduled_start && t.scheduled_end && t.scheduled_start > t.scheduled_end) {
-            problems.push(`#${i + 1} "${t.title}": start after end`);
+          if (epoch.scheduled_start !== void 0 && epoch.scheduled_end !== void 0 && epoch.scheduled_start > epoch.scheduled_end) {
+            problems.push(`#${i + 1} "${t.title}": scheduled start after scheduled end`);
           }
+          if (epoch.actual_start !== void 0 && epoch.actual_end !== void 0 && epoch.actual_start > epoch.actual_end) {
+            problems.push(`#${i + 1} "${t.title}": actual start after actual end`);
+          }
+          if (t.stream !== void 0 && !cfg.streamField) problems.push(`#${i + 1} "${t.title}": stream is not configured (SDP_STREAM_FIELD)`);
           plan.push({ ...t, milestone_id: mid ?? null });
         }
         if (dry_run || problems.length) {
@@ -39566,10 +39715,16 @@ function registerTools(server, sdp, cfg) {
         const failed = [];
         const idByKey = /* @__PURE__ */ new Map();
         const createdPlan = [];
+        const batchId = `b${Date.now().toString(36)}`;
+        let stopped = false;
         for (const t of plan) {
+          if (extra?.signal?.aborted) {
+            stopped = true;
+            break;
+          }
           try {
             const { key, depends_on, ...fields } = t;
-            const task = await createTask({ ...fields, project_id, milestone_id: t.milestone_id ?? void 0 });
+            const task = await createTask({ ...fields, project_id, milestone_id: t.milestone_id ?? void 0, batch_id: batchId });
             created.push(task);
             if (key) idByKey.set(key, String(task.id));
             createdPlan.push({ t, id: String(task.id) });
@@ -39580,6 +39735,10 @@ function registerTools(server, sdp, cfg) {
         const deps = [];
         const depFailed = [];
         for (const { t, id } of createdPlan) {
+          if (extra?.signal?.aborted) {
+            stopped = true;
+            break;
+          }
           for (const d of t.depends_on ?? []) {
             const parent = idByKey.get(d) ?? (keys.has(d) ? void 0 : d);
             if (!parent) {
@@ -39593,7 +39752,11 @@ function registerTools(server, sdp, cfg) {
             }
           }
         }
+        if (stopped) sdp.audit({ op: "bulk_create_tasks", outcome: "stopped", project_id, batch_id: batchId, created: created.length });
         return ok({
+          batch_id: batchId,
+          stopped_because_client_disconnected: stopped,
+          not_created: plan.length - created.length - failed.length,
           created: created.length,
           failed,
           dependencies_created: deps.length,
@@ -39601,18 +39764,18 @@ function registerTools(server, sdp, cfg) {
           tasks: created.map(({ description, ...x }) => x)
         });
       } catch (e) {
-        return fail(e);
+        return failWrite(sdp, "bulk_create_tasks", { project_id }, e);
       }
     }
   );
-  const depPath = (projectId) => `/projects/${projectId}/task_dependencies`;
+  const depPath = (projectId) => `/projects/${seg(projectId)}/task_dependencies`;
   async function addDependency(projectId, parentId, childId) {
     if (parentId === childId) throw new Error("A task cannot depend on itself.");
     const res = await sdp.post(depPath(projectId), {
       task_dependency: { parent_task: { id: parentId }, child_task: { id: childId } }
     });
     const dep = res.task_dependency ?? res;
-    sdp.audit({ op: "add_dependency", project_id: projectId, parent_task_id: parentId, child_task_id: childId, dependency_id: dep?.id });
+    sdp.audit({ op: "add_dependency", outcome: "ok", project_id: projectId, parent_task_id: parentId, child_task_id: childId, dependency_id: dep?.id });
     return {
       id: dep?.id ?? null,
       predecessor: { id: parentId, title: dep?.parent_task?.title ?? null },
@@ -39624,7 +39787,7 @@ function registerTools(server, sdp, cfg) {
     {
       title: "List task dependencies",
       description: "List all task dependencies of a project (predecessor \u2192 successor).",
-      inputSchema: { project_id: external_exports.string() },
+      inputSchema: { project_id: idSchema },
       annotations: RO
     },
     async ({ project_id }) => {
@@ -39647,9 +39810,9 @@ function registerTools(server, sdp, cfg) {
       title: "Add task dependency",
       description: "Make one task depend on another: the successor starts after the predecessor. Use task ids from sdp_list_tasks.",
       inputSchema: {
-        project_id: external_exports.string(),
-        predecessor_task_id: external_exports.string(),
-        successor_task_id: external_exports.string()
+        project_id: idSchema,
+        predecessor_task_id: idSchema,
+        successor_task_id: idSchema
       },
       annotations: RW
     },
@@ -39658,7 +39821,7 @@ function registerTools(server, sdp, cfg) {
         assertWritable(project_id);
         return ok(await addDependency(project_id, predecessor_task_id, successor_task_id));
       } catch (e) {
-        return fail(e);
+        return failWrite(sdp, "add_dependency", { project_id, task_id: successor_task_id }, e);
       }
     }
   );
@@ -39668,34 +39831,44 @@ function registerTools(server, sdp, cfg) {
       title: "Update task",
       description: "Update fields of an existing task (status, dates, owner, % complete, ...). Only the fields you pass are changed. Pass milestone_id when the task belongs to a milestone. Optionally add a comment explaining the change.",
       inputSchema: {
-        project_id: external_exports.string(),
-        task_id: external_exports.string(),
-        milestone_id: external_exports.string().optional(),
+        project_id: idSchema,
+        task_id: idSchema,
+        milestone_id: idSchema.optional(),
         title: external_exports.string().optional(),
         ...taskFields,
         change_note: external_exports.string().optional().describe("If given, also posted as a comment on the task")
       },
-      annotations: { ...RW, idempotentHint: true }
+      annotations: RW_UPDATE
     },
     async (a) => {
       try {
         assertWritable(a.project_id);
         const body = await buildTaskOrMilestoneBody(a.project_id, a, "task");
         if (!Object.keys(body).length && !a.change_note) throw new Error("Nothing to update.");
+        const path = `${taskPath(a.project_id, a.milestone_id)}/${seg(a.task_id)}`;
+        const current = (await sdp.get(path)).task ?? {};
+        assertSameProject(current, a.project_id, `task ${a.task_id}`);
         let task;
         if (Object.keys(body).length) {
-          const res = await sdp.put(`${taskPath(a.project_id, a.milestone_id)}/${a.task_id}`, { task: body });
+          const res = await sdp.put(path, { task: body });
           task = res.task;
-          sdp.audit({ op: "update_task", project_id: a.project_id, task_id: a.task_id, fields: Object.keys(body) });
+          sdp.audit({
+            op: "update_task",
+            outcome: "ok",
+            project_id: a.project_id,
+            task_id: a.task_id,
+            fields: Object.keys(body),
+            before: beforeImage(current, body)
+          });
         }
         if (a.change_note) {
-          const { path, root } = commentTarget(a.project_id, a.milestone_id, a.task_id);
-          await sdp.post(path, { [root]: { comment: a.change_note } });
-          sdp.audit({ op: "add_comment", project_id: a.project_id, task_id: a.task_id });
+          const { path: cpath, root } = commentTarget(a.project_id, a.milestone_id, a.task_id);
+          await sdp.post(cpath, { [root]: { comment: a.change_note } });
+          sdp.audit({ op: "add_comment", outcome: "ok", project_id: a.project_id, task_id: a.task_id });
         }
         return ok(task ? shape.task(task) : { comment_added: true });
       } catch (e) {
-        return fail(e);
+        return failWrite(sdp, "update_task", a, e);
       }
     }
   );
@@ -39705,11 +39878,11 @@ function registerTools(server, sdp, cfg) {
       title: "Add comment",
       description: "Add a comment to a project (project_id only), a milestone (+milestone_id), a project task (+task_id) or a milestone task (+milestone_id +task_id). HTML allowed. Use for status notes and decisions.",
       inputSchema: {
-        project_id: external_exports.string(),
-        milestone_id: external_exports.string().optional(),
-        task_id: external_exports.string().optional(),
+        project_id: idSchema,
+        milestone_id: idSchema.optional(),
+        task_id: idSchema.optional(),
         comment: external_exports.string(),
-        parent_comment_id: external_exports.string().optional().describe("Reply to an existing comment")
+        parent_comment_id: idSchema.optional().describe("Reply to an existing comment")
       },
       annotations: RW
     },
@@ -39720,31 +39893,31 @@ function registerTools(server, sdp, cfg) {
         const body = { comment };
         if (parent_comment_id) body.parent_comment = { id: parent_comment_id };
         const res = await sdp.post(path, { [root]: body });
-        sdp.audit({ op: "add_comment", project_id, milestone_id: milestone_id ?? null, task_id: task_id ?? null });
+        sdp.audit({ op: "add_comment", outcome: "ok", project_id, milestone_id: milestone_id ?? null, task_id: task_id ?? null });
         return ok(shape.comment(res[root] ?? {}));
       } catch (e) {
-        return fail(e);
+        return failWrite(sdp, "add_comment", { project_id, milestone_id, task_id }, e);
       }
     }
   );
 }
 function commentTarget(projectId, milestoneId, taskId) {
   if (taskId && milestoneId)
-    return { path: `/projects/${projectId}/milestones/${milestoneId}/tasks/${taskId}/comments`, root: "task_comment" };
-  if (taskId) return { path: `/projects/${projectId}/tasks/${taskId}/comments`, root: "task_comment" };
-  if (milestoneId) return { path: `/projects/${projectId}/milestones/${milestoneId}/comments`, root: "milestone_comment" };
-  return { path: `/projects/${projectId}/comments`, root: "project_comment" };
+    return { path: `/projects/${seg(projectId)}/milestones/${seg(milestoneId)}/tasks/${seg(taskId)}/comments`, root: "task_comment" };
+  if (taskId) return { path: `/projects/${seg(projectId)}/tasks/${seg(taskId)}/comments`, root: "task_comment" };
+  if (milestoneId) return { path: `/projects/${seg(projectId)}/milestones/${seg(milestoneId)}/comments`, root: "milestone_comment" };
+  return { path: `/projects/${seg(projectId)}/comments`, root: "project_comment" };
 }
 
 // src/server.ts
-var VERSION = "0.5.0";
+var VERSION = "0.5.1";
 var INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
 - Changes are made as the signed-in user and limited by that user's ServiceDesk permissions; the server may further restrict writes to configured projects.
 - Dates are YYYY-MM-DD in the configured timezone (SDP_TIMEZONE, default UTC).
 - Before bulk changes, run sdp_bulk_create_tasks with dry_run=true and show the plan to the user.
 - Task and milestone owners must be project members.`;
-function buildServer(cfg, tokens, user2) {
-  const sdp = new SdpClient(cfg, tokens, user2);
+function buildServer(cfg, tokens, user2, onTokenRejected) {
+  const sdp = new SdpClient(cfg, tokens, user2, onTokenRejected);
   const server = new McpServer({ name: "servicedesk-projects", version: VERSION }, { instructions: INSTRUCTIONS });
   registerTools(server, sdp, cfg);
   return server;
@@ -39752,7 +39925,10 @@ function buildServer(cfg, tokens, user2) {
 async function main() {
   const cfg = loadConfig();
   if (cfg.transport === "http") {
-    const handler = createHttpHandler(cfg, (token, user2) => buildServer(cfg, new BearerTokenProvider(token), user2.email));
+    const handler = createHttpHandler(
+      cfg,
+      (token, user2, onTokenRejected) => buildServer(cfg, new BearerTokenProvider(token), user2.email, onTokenRejected)
+    );
     const httpServer = createServer(handler);
     httpServer.requestTimeout = 12e4;
     httpServer.headersTimeout = 3e4;

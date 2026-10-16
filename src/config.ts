@@ -64,8 +64,23 @@ export interface Config {
   zohoScopes: string[];
   allowedEmailDomains: string[]; // e.g. ["example.com"]; empty = any signed-in Zoho user of the portal
   allowedUsers: string[]; // explicit e-mail allow-list; empty = no restriction beyond domains
-  rateLimitPerMinute: number;
+  allowAnyZohoUser: boolean;
+  rateLimitPerMinute: number; // per signed-in user
+  ipRateLimitPerMinute: number; // per client IP, before authentication
   tokenCacheSeconds: number;
+  trustProxyHops: number; // reverse proxies in front (Azure Container Apps ingress = 1)
+  allowedOrigins: string[]; // browser Origins accepted on /mcp (besides PUBLIC_BASE_URL's)
+  sdpTimeoutMs: number;
+}
+
+function num(name: string, def: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return def;
+  const v = Number(raw);
+  if (!Number.isInteger(v) || v < min || v > max) {
+    throw new Error(`Invalid configuration: ${name}=${JSON.stringify(raw)} (expected an integer between ${min} and ${max})`);
+  }
+  return v;
 }
 
 function list(name: string): string[] {
@@ -88,6 +103,20 @@ function jsonMap(name: string): Record<string, string> {
 }
 
 export function loadConfig(): Config {
+  const cfg = buildConfig();
+  if (cfg.transport === "http" && !cfg.allowAnyZohoUser && !cfg.allowedEmailDomains.length && !cfg.allowedUsers.length) {
+    throw new Error(
+      "Refusing to start: in HTTP mode set ALLOWED_EMAIL_DOMAINS and/or ALLOWED_USERS " +
+        "(or ALLOW_ANY_ZOHO_USER=true to accept any Zoho account — not recommended).",
+    );
+  }
+  if (cfg.transport === "http" && !/^https?:\/\/[^/]+$/.test(cfg.publicBaseUrl ?? "")) {
+    throw new Error("Invalid configuration: PUBLIC_BASE_URL must be scheme://host[:port] without a path");
+  }
+  return cfg;
+}
+
+function buildConfig(): Config {
   const writeRaw = (process.env.SDP_WRITE_PROJECT_IDS ?? "").trim();
   const transport = (process.env.MCP_TRANSPORT as "stdio" | "http") ?? "stdio";
   const single = transport !== "http";
@@ -95,7 +124,7 @@ export function loadConfig(): Config {
     sdpBaseUrl: req("SDP_BASE_URL").replace(/\/+$/, ""),
     portal: req("SDP_PORTAL"),
     zohoAccountsUrl: (process.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.com").replace(/\/+$/, ""),
-    clientId: single ? req("ZOHO_CLIENT_ID") : process.env.ZOHO_CLIENT_ID,
+    clientId: req("ZOHO_CLIENT_ID"), // HTTP mode: the only Zoho client the OAuth facade accepts
     clientSecret: single ? req("ZOHO_CLIENT_SECRET") : process.env.ZOHO_CLIENT_SECRET,
     refreshToken: process.env.ZOHO_REFRESH_TOKEN,
     writeProjectIds:
@@ -120,7 +149,12 @@ export function loadConfig(): Config {
       .filter(Boolean),
     allowedEmailDomains: list("ALLOWED_EMAIL_DOMAINS").map((d) => d.replace(/^@/, "")),
     allowedUsers: list("ALLOWED_USERS"),
-    rateLimitPerMinute: Number(process.env.RATE_LIMIT_PER_MINUTE ?? 120),
-    tokenCacheSeconds: Number(process.env.TOKEN_CACHE_SECONDS ?? 300),
+    allowAnyZohoUser: process.env.ALLOW_ANY_ZOHO_USER === "true",
+    rateLimitPerMinute: num("RATE_LIMIT_PER_MINUTE", 120, 1, 100_000),
+    ipRateLimitPerMinute: num("IP_RATE_LIMIT_PER_MINUTE", 300, 1, 100_000),
+    tokenCacheSeconds: num("TOKEN_CACHE_SECONDS", 60, 0, 3600),
+    trustProxyHops: num("TRUST_PROXY_HOPS", 0, 0, 5),
+    allowedOrigins: list("ALLOWED_ORIGINS"),
+    sdpTimeoutMs: num("SDP_TIMEOUT_SECONDS", 45, 5, 300) * 1000,
   };
 }

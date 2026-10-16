@@ -1,0 +1,14 @@
+# Keep secrets and local files out of the build context (az acr build uploads the folder)
+.env
+.env.*
+*.jsonl
+*.log
+*.txt
+*.ps1
+.git
+node_modules
+dist
+build
+test
+docs
+Claude outputs

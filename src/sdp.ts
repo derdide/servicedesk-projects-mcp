@@ -22,6 +22,7 @@ export class SdpClient {
     private cfg: Config,
     private tokens: TokenProvider,
     private user?: string, // e-mail of the signed-in user (HTTP mode), for the audit trail
+    private onTokenRejected?: () => void, // HTTP mode: forget the cached token check
   ) {
     this.apiBase = `${cfg.sdpBaseUrl}/app/${encodeURIComponent(cfg.portal)}/api/v3`;
   }
@@ -58,6 +59,11 @@ export class SdpClient {
   }
 
   private async call(method: string, path: string, inputData?: Json, retried = false): Promise<Json> {
+    // Defence in depth: only plain API paths, never traversal, encoded dots or extra query strings.
+    const [pathname, query] = path.split("?", 2);
+    if (!/^\/[A-Za-z0-9_/]+$/.test(pathname) || pathname.includes("//") || (query !== undefined && !query.startsWith("input_data="))) {
+      throw new SdpError(`Refused unsafe ServiceDesk path`, 400, { path: pathname.slice(0, 80) });
+    }
     const token = await this.tokens.getAccessToken();
     const init: RequestInit = {
       method,
@@ -68,7 +74,7 @@ export class SdpClient {
       },
       ...(inputData ? { body: new URLSearchParams({ input_data: JSON.stringify(inputData) }) } : {}),
     };
-    const res = await fetch(this.apiBase + path, init);
+    const res = await fetch(this.apiBase + path, { ...init, signal: AbortSignal.timeout(this.cfg.sdpTimeoutMs) });
     const text = await res.text();
     let json: Json = {};
     try {
@@ -76,9 +82,17 @@ export class SdpClient {
     } catch {
       json = { raw: text.slice(0, 2000) };
     }
-    if (res.status === 401 && !retried) {
-      this.tokens.invalidate();
-      return this.call(method, path, inputData, true);
+    if (res.status === 401) {
+      if (this.onTokenRejected) {
+        // HTTP mode: the token belongs to the client, which must refresh it. Forget our cached check so the
+        // next request is re-validated and answered with HTTP 401 if the token is no longer valid.
+        this.onTokenRejected();
+        throw new SdpError("ServiceDesk rejected your access token (expired or revoked). Please retry; if it persists, reconnect / sign in again.", 401, json);
+      }
+      if (!retried) {
+        this.tokens.invalidate();
+        return this.call(method, path, inputData, true);
+      }
     }
     if (!res.ok) {
       throw new SdpError(`ServiceDesk ${method} ${path} failed (HTTP ${res.status}): ${JSON.stringify(json).slice(0, 1500)}`, res.status, json);

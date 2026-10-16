@@ -1,6 +1,6 @@
 {
   "name": "servicedesk-projects-mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "MCP server for ManageEngine ServiceDesk Plus Cloud projects: milestones, tasks, comments and task dependencies",
   "scripts": {
     "test": "node test/smoke.mjs && node test/http.mjs",
@@ -28,7 +28,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "repository": {
     "type": "git",

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1 — 2026-10-16
+Security fixes from an independent review of 0.5.0.
+- **IDs are numeric-only** and URL-encoded; the API client refuses any non-plain path. Path traversal through `task_id`, `milestone_id` or comment targets (which could reach other projects, other modules or other portals) is no longer possible. Updates first read the record and refuse if it belongs to another project.
+- HTTP mode: JSON-RPC batches refused, 256 KB body limit on `/mcp`; per-IP rate limit before authentication; rejected tokens cached for 60 s; token check cache 60 s (was 300 s) and evicted when ServiceDesk rejects a token; `Host`/`Origin` checks; timeouts on all outbound calls.
+- HTTP mode fails closed: refuses to start without `ALLOWED_EMAIL_DOMAINS`/`ALLOWED_USERS` (or explicit `ALLOW_ANY_ZOHO_USER=true`); numeric settings validated at startup.
+- OAuth facade accepts only `ZOHO_CLIENT_ID`; HTTP Basic client credentials parsed correctly (secrets containing `:`), malformed ones answered with 401; Basic + form credentials together refused; query strings never logged.
+- Dates: impossible calendar dates refused (no more silent roll-over); dry runs compare real timestamps and validate all date fields.
+- Bulk create: at most 50 tasks per call, stops when the client disconnects, batch id in the audit.
+- Update tools flagged `destructiveHint: true`; refusals do not reveal writable project ids.
+- Audit: every write attempt with outcome (`ok` / `refused` / `failed` / `stopped`), the resolved project, and the previous values of changed fields.
+- Dockerfile builds from source (multi-stage); `.dockerignore`; CI workflow and Dependabot; Node ≥ 20.
+- README: security model (token passthrough, prompt injection, what the guard-rails cover).
+
 ## 0.5.0 — 2026-10-16
 - **Multi-user HTTP mode.** Each user signs in with their own Zoho/ServiceDesk account through their AI client (Claude, Microsoft 365 Copilot declarative agent, Copilot Studio); the server forwards the user's token and stores no tokens or secrets.
 - OAuth discovery (RFC 9728 protected resource metadata, RFC 8414 authorization server metadata) and a facade in front of Zoho: `access_type=offline`, scope normalisation, `resource` parameter stripped, Zoho errors mapped to RFC 6749 codes.
