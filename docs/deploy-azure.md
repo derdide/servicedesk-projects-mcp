@@ -10,7 +10,7 @@ LOC=switzerlandnorth
 ACR=<yourregistry>            # globally unique, lowercase
 APP=servicedesk-mcp
 ENV=cae-servicedesk-mcp
-VER=0.5.2
+VER=0.5.3
 
 az group create -n $RG -l $LOC
 az acr create -n $ACR -g $RG --sku Basic
