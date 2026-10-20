@@ -1,0 +1,20 @@
+# Caddy obtains and renews the certificate for MCP_DOMAIN automatically.
+{$MCP_DOMAIN} {
+	# Only what the server serves; everything else is answered here.
+	@app path /mcp /mcp/ /healthz /oauth/* /.well-known/*
+	handle @app {
+		# flush_interval -1: do not buffer streamed MCP responses
+		reverse_proxy mcp:8080 {
+			flush_interval -1
+		}
+	}
+	handle {
+		respond 404
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+	log
+}

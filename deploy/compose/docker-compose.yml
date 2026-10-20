@@ -1,0 +1,73 @@
+# Multi-user (HTTP) mode on any Docker host — e.g. a homelab test before deploying to the cloud.
+# Guide: docs/self-host.md
+#
+#   cp .env.example .env    # then edit .env
+#   docker compose up -d --build                     # server only, behind a reverse proxy you already run
+#   docker compose --profile caddy up -d --build     # or: with its own Caddy (ports 80/443 reachable from the internet)
+#   docker compose --profile tunnel up -d --build    # or: via Cloudflare Tunnel (no inbound ports)
+#
+# Claude and Copilot call the server from their own clouds, so it must be reachable
+# from the internet on HTTPS under MCP_DOMAIN.
+
+services:
+  mcp:
+    build:
+      context: ../..            # repository root; the Dockerfile builds from source
+    image: servicedesk-projects-mcp:local
+    restart: unless-stopped
+    environment:
+      MCP_TRANSPORT: http
+      PORT: "8080"
+      PUBLIC_BASE_URL: https://${MCP_DOMAIN:?set MCP_DOMAIN in .env}
+      SDP_BASE_URL: ${SDP_BASE_URL:?set SDP_BASE_URL in .env}
+      SDP_PORTAL: ${SDP_PORTAL:?set SDP_PORTAL in .env}
+      ZOHO_ACCOUNTS_URL: ${ZOHO_ACCOUNTS_URL:-https://accounts.zoho.com}
+      ZOHO_CLIENT_ID: ${ZOHO_CLIENT_ID:?set ZOHO_CLIENT_ID in .env}
+      ALLOWED_USERS: ${ALLOWED_USERS:-}
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
+      SDP_TIMEZONE: ${SDP_TIMEZONE:-UTC}
+      SDP_WRITE_PROJECT_IDS: ${SDP_WRITE_PROJECT_IDS:-*}
+      SDP_STREAM_FIELD: ${SDP_STREAM_FIELD:-}
+      SDP_DEFAULT_TASK_TEMPLATE: ${SDP_DEFAULT_TASK_TEMPLATE:-Default Task}
+      SDP_TASK_TEMPLATES: ${SDP_TASK_TEMPLATES:-}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}   # proxies in front that add X-Forwarded-For (Caddy, cloudflared: 1)
+    # Plain HTTP for a reverse proxy. Default: this host only. For a proxy on another machine, set
+    # MCP_BIND to this host's LAN address (and firewall the port to the proxy's address).
+    ports:
+      - "${MCP_BIND:-127.0.0.1}:${MCP_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  caddy:
+    profiles: [caddy]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [mcp]
+    ports:
+      - "80:80"                 # needed for the Let's Encrypt HTTP challenge and the redirect to HTTPS
+      - "443:443"
+    environment:
+      MCP_DOMAIN: ${MCP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificates
+      - caddy_config:/config
+
+  cloudflared:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on: [mcp]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}   # required for this profile
+
+volumes:
+  caddy_data:
+  caddy_config:

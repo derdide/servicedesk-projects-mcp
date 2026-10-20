@@ -207,6 +207,7 @@ Set-up guides:
 
 - [docs/zoho-client.md](docs/zoho-client.md) — the one Zoho OAuth client all AI clients share, and how to verify it
 - [docs/deploy-azure.md](docs/deploy-azure.md) — Azure Container Apps, custom domain, hardening
+- [docs/self-host.md](docs/self-host.md) — Docker Compose on any host (e.g. a homelab test), with Caddy or Cloudflare Tunnel
 - [docs/clients.md](docs/clients.md) — connect Claude, a Microsoft 365 Copilot declarative agent, and Copilot Studio
 
 ## Development

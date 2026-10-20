@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- `deploy/compose/` and [docs/self-host.md](docs/self-host.md): Docker Compose example for self-hosting (Caddy or Cloudflare Tunnel), e.g. to test the hosted mode end to end.
+
 ## 0.5.3 — 2026-10-16
 - `@modelcontextprotocol/sdk` 1.30.1 → 1.32.1 (advisory GHSA-6qxp-vccf-f47h, high; it concerns the SDK's OAuth *client*, which this server does not use, but `npm audit` rightly blocks CI). `zod` 4.6.7, `@types/node` 26.6.5.
 
