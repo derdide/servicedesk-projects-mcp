@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **Project-level writes** (mock-tested; not yet verified live): `sdp_update_project`; `sdp_add_project_member`, `sdp_update_project_member` (role, deactivate); `sdp_list_worklogs`, `sdp_add_worklog`, `sdp_update_worklog` on project and milestone tasks (the task is checked to belong to the project first); `sdp_update_comment` on all four comment levels; `sdp_attach_requests` / `sdp_detach_requests`; `sdp_attach_changes` / `sdp_detach_changes` (changes caused by the project, or the change that initiated it). Detach tools are flagged destructive; they remove links only.
+- `sdp_list_tasks`: `project_level_only` for the tasks outside any milestone.
 - `deploy/compose/` and [docs/self-host.md](docs/self-host.md): Docker Compose example for self-hosting (Caddy or Cloudflare Tunnel), e.g. to test the hosted mode end to end.
 
 ## 0.5.3 — 2026-10-16
