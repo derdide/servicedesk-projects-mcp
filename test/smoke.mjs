@@ -14,7 +14,7 @@ const mock = createServer(async (req, res) => {
   let body = ""; for await (const c of req) body += c;
   const url = new URL(req.url, "http://x");
   const input = req.method === "GET" ? url.searchParams.get("input_data") : new URLSearchParams(body).get("input_data");
-  log.push({ m: req.method, p: url.pathname, auth: req.headers.authorization, accept: req.headers.accept, input: input && JSON.parse(input) });
+  log.push({ m: req.method, p: url.pathname, auth: req.headers.authorization, accept: req.headers.accept, input: input && JSON.parse(input), form: req.method === "DELETE" ? Object.fromEntries(new URLSearchParams(body)) : undefined });
   const send = (o, s = 200) => { res.writeHead(s, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
   if (url.pathname === "/oauth/v2/token") { tokenCalls++; return send({ access_token: "tok" + tokenCalls, expires_in: 3600 }); }
   const p = url.pathname.replace("/app/servicedesk/api/v3", "");
@@ -24,6 +24,19 @@ const mock = createServer(async (req, res) => {
   if (p === `/projects/${P}/tasks` && req.method === "GET") return send({ tasks: [{ id: "100000000000201", title: "Sandbox migration #1" }], list_info: { has_more_rows: false } });
   if (p === `/projects/${P}/task_dependencies` && req.method === "POST") { const d = JSON.parse(input).task_dependency; return send({ task_dependency: { id: "D" + log.length, ...d } }); }
   if (p === `/projects/${P}/task_dependencies` && req.method === "GET") return send({ task_dependencies: [{ id: "D1", parent_task: { id: "100000000000201", title: "Sandbox migration #1" }, child_task: { id: "T9", title: "ATC" } }] });
+  const J = () => JSON.parse(input);
+  if (p === `/projects/${P}` && req.method === "GET") return send({ project: { id: P, title: "Old project", status: { name: "Open" }, percentage_completion: 10 } });
+  if (p === `/projects/${P}` && req.method === "PUT") return send({ project: { id: P, ...J().project } });
+  if (p === `/projects/${P}/project_members` && req.method === "POST") return send({ project_member: { id: "M2", ...J().project_member } });
+  if (/\/project_members\/\d+$/.test(p) && req.method === "GET") return send({ project_member: { id: "M2", role: { name: "Team Member" }, is_active: true } });
+  if (/\/project_members\/\d+$/.test(p) && req.method === "PUT") return send({ project_member: { id: "M2", ...J().project_member } });
+  if (p.endsWith("/worklogs") && req.method === "GET") return send({ worklogs: [{ id: "W1", owner: { id: "300001", name: "Doe, Jane" }, time_spent: { hours: "2", minutes: "30" } }], list_info: { has_more_rows: false } });
+  if (p.endsWith("/worklogs") && req.method === "POST") return send({ worklog: { id: "W2", ...J().worklog } });
+  if (/\/worklogs\/\d+$/.test(p) && req.method === "GET") return send({ worklog: { id: "W1", description: "old", time_spent: { hours: "1", minutes: "0" } } });
+  if (/\/worklogs\/\d+$/.test(p) && req.method === "PUT") return send({ worklog: { id: "W1", ...J().worklog } });
+  if (/\/comments\/\d+$/.test(p) && req.method === "GET") return send({ project_comment: { id: "C9", comment: "old text" } });
+  if (/\/comments\/\d+$/.test(p) && req.method === "PUT") return send({ project_comment: { id: "C9", ...J().project_comment } });
+  if ((p.endsWith("/_request_associations") || p.includes("/rel/")) && ["POST", "DELETE"].includes(req.method)) return send({ response_status: { status_code: 2000, status: "success" } });
   if (p.endsWith("/tasks") && req.method === "POST") { const t = JSON.parse(input).task; return send({ task: { id: String(900000 + log.length), ...t, project: { id: P }, milestone: { id: M, title: "Phase 1" } } }); }
   if (/\/tasks\/\d+$/.test(p) && req.method === "GET") {
     const id = p.split("/").pop();
@@ -49,7 +62,7 @@ let passed = 0;
 const check = (cond, label) => { assert.ok(cond, label); passed++; console.log("ok -", label); };
 
 try {
-  check(tools.length === 15 && tools.includes("sdp_add_dependency"), `15 tools registered (${tools.length})`);
+  check(tools.length === 26 && tools.includes("sdp_add_dependency") && tools.includes("sdp_add_worklog"), `26 tools registered (${tools.length})`);
 
   const ms = await call("sdp_list_milestones", { project_id: P });
   check(!ms.err && JSON.parse(ms.text)[0].scheduled_end.startsWith("2026-12-31"), "milestones listed after 401 + token refresh");
@@ -129,6 +142,55 @@ try {
   const updLine = auditLines.filter((l) => l.op === "update_task" && l.outcome === "ok").at(-1);
   check(!okUpd.err && updLine?.before?.title === "Old title", "F14: audit keeps the before-value of changed fields");
   check(auditLines.some((l) => l.outcome === "refused" && l.op === "update_task"), "F14: refused writes are audited");
+
+  // ---- project-level writes (0.6.0) ----
+  const T = "100000000000201", W = "100000000000301";
+  const last = (m, suffix) => log.filter((l) => l.m === m && l.p.endsWith(suffix)).at(-1);
+
+  const pu = await call("sdp_update_project", { project_id: P, status: "In Progress", percentage_completion: 40, projected_end: "2026-12-31", owner_email: "jane.doe@example.com" });
+  const puBody = last("PUT", `/projects/${P}`)?.input.project;
+  check(!pu.err && puBody.status.name === "In Progress" && puBody.percentage_completion === "40" && puBody.owner.id === "300001", "project updated (status, %, owner by email)");
+  check(puBody.projected_end.value === "1798757999999", "projected_end = end of day in SDP_TIMEZONE");
+  check((await call("sdp_update_project", { project_id: "999", status: "Closed" })).err, "project update outside SDP_WRITE_PROJECT_IDS refused");
+
+  const wl = await call("sdp_add_worklog", { project_id: P, task_id: T, owner_email: "jane.doe@example.com", start: "2026-10-28T09:00", end: "2026-10-28T11:30", hours: 2, minutes: 30, description: "Analysis" });
+  const wlBody = last("POST", `/tasks/${T}/worklogs`)?.input.worklog;
+  check(!wl.err && wlBody.owner.id === "300001" && wlBody.time_spent.hours === "2" && wlBody.time_spent.minutes === "30", "worklog added on a project task");
+  check(Number(wlBody.end_time.value) - Number(wlBody.start_time.value) === 9_000_000, "worklog start/end converted to epoch");
+  const wlM = await call("sdp_add_worklog", { project_id: P, milestone_id: M, task_id: T, owner_email: "jane.doe@example.com", hours: 1 });
+  check(!wlM.err && !!last("POST", `/milestones/${M}/tasks/${T}/worklogs`), "worklog added on a milestone task");
+  check((await call("sdp_add_worklog", { project_id: P, task_id: T, owner_email: "jane.doe@example.com" })).err, "worklog without time refused");
+  check(/not a member/.test((await call("sdp_add_worklog", { project_id: P, task_id: T, owner_email: "nobody@example.com", hours: 1 })).text), "worklog owner must be a project member");
+  const postsBefore = log.filter((l) => l.m === "POST").length;
+  const wlOther = await call("sdp_add_worklog", { project_id: P, task_id: "100000000000999", owner_email: "jane.doe@example.com", hours: 1 });
+  check(wlOther.err && /belongs to project/.test(wlOther.text) && log.filter((l) => l.m === "POST").length === postsBefore, "worklog on a task of another project refused before any POST");
+  check((await call("sdp_add_worklog", { project_id: P, task_id: T, owner_email: "jane.doe@example.com", start: "2026-10-28T12:00", end: "2026-10-28T11:00" })).err, "worklog start after end refused");
+  const wls = JSON.parse((await call("sdp_list_worklogs", { project_id: P, task_id: T })).text);
+  check(wls[0].time_spent.hours === 2 && wls[0].time_spent.minutes === 30, "worklogs listed");
+  const wu = await call("sdp_update_worklog", { project_id: P, task_id: T, worklog_id: W, description: "new" });
+  check(!wu.err && last("PUT", `/worklogs/${W}`)?.input.worklog.description === "new", "worklog updated");
+
+  const cu = await call("sdp_update_comment", { project_id: P, comment_id: "100000000000401", comment: "edited" });
+  check(!cu.err && last("PUT", `/projects/${P}/comments/100000000000401`)?.input.project_comment.comment === "edited", "project comment edited");
+
+  const am = await call("sdp_add_project_member", { project_id: P, user_email: "new.person@example.com", role: "Team Member" });
+  const amBody = last("POST", `/projects/${P}/project_members`)?.input.project_member;
+  check(!am.err && amBody.user.email_id === "new.person@example.com" && amBody.role.name === "Team Member", "project member added by email");
+  check((await call("sdp_add_project_member", { project_id: P, user_email: "a@example.com", user_id: "1" })).err, "member: user_email and user_id together refused");
+  const um = await call("sdp_update_project_member", { project_id: P, member_id: "100000000000501", active: false });
+  check(!um.err && last("PUT", "/project_members/100000000000501")?.input.project_member.is_active === false, "project member deactivated");
+
+  const R = ["100000000000601", "100000000000602"];
+  check(!(await call("sdp_attach_requests", { project_id: P, request_ids: R })).err && last("POST", "/_request_associations")?.input.requests[1] === R[1], "requests attached");
+  check(!(await call("sdp_detach_requests", { project_id: P, request_ids: R })).err && last("DELETE", "/_request_associations")?.form.ids === R.join(","), "requests detached (ids form field)");
+  check(!(await call("sdp_attach_changes", { project_id: P, change_ids: ["100000000000701"] })).err && last("POST", "/rel/initiated_changes")?.input.initiated_changes[0].change.id === "100000000000701", "change caused by project attached");
+  check(!(await call("sdp_attach_changes", { project_id: P, change_ids: ["100000000000702"], relation: "initiated_project" })).err && !!last("POST", "/rel/initiated_by_change"), "initiating change attached");
+  check(!(await call("sdp_detach_changes", { project_id: P, change_ids: ["100000000000701"] })).err && last("DELETE", "/rel/initiated_changes")?.form.ids === "100000000000701", "change detached");
+  check((await call("sdp_attach_requests", { project_id: P, request_ids: ["../1"] })).err, "non-numeric request id refused");
+  const ann2 = Object.fromEntries((await client.listTools()).tools.map((t) => [t.name, t.annotations]));
+  check(ann2.sdp_detach_requests.destructiveHint && ann2.sdp_update_project.destructiveHint && ann2.sdp_list_worklogs.readOnlyHint, "detach and update tools flagged destructive");
+  const pl = JSON.parse((await call("sdp_list_tasks", { project_id: P, project_level_only: true })).text);
+  check(pl.length === 1 && pl[0].milestone === null, "project_level_only lists tasks outside milestones");
 
   console.log(`\n${passed} checks passed`);
 } finally {

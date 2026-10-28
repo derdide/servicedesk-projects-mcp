@@ -40,6 +40,11 @@ export class SdpClient {
     return this.call("PUT", path, inputData);
   }
 
+  /** DELETE with plain form fields (ServiceDesk takes `ids=...` on its relationship endpoints). */
+  async delete(path: string, form: Record<string, string>): Promise<Json> {
+    return this.call("DELETE", path, undefined, false, form);
+  }
+
   /** Fetch every page of a list endpoint (up to `max` records). */
   async listAll(path: string, rootKey: string, max = 500, extra: Json = {}): Promise<Json[]> {
     const out: Json[] = [];
@@ -58,21 +63,22 @@ export class SdpClient {
     return out.slice(0, max);
   }
 
-  private async call(method: string, path: string, inputData?: Json, retried = false): Promise<Json> {
+  private async call(method: string, path: string, inputData?: Json, retried = false, form?: Record<string, string>): Promise<Json> {
     // Defence in depth: only plain API paths, never traversal, encoded dots or extra query strings.
     const [pathname, query] = path.split("?", 2);
     if (!/^\/[A-Za-z0-9_/]+$/.test(pathname) || pathname.includes("//") || (query !== undefined && !query.startsWith("input_data="))) {
       throw new SdpError(`Refused unsafe ServiceDesk path`, 400, { path: pathname.slice(0, 80) });
     }
     const token = await this.tokens.getAccessToken();
+    const body = inputData ? new URLSearchParams({ input_data: JSON.stringify(inputData) }) : form ? new URLSearchParams(form) : undefined;
     const init: RequestInit = {
       method,
       headers: {
         Accept: "application/vnd.manageengine.sdp.v3+json",
         Authorization: `Zoho-oauthtoken ${token}`,
-        ...(inputData ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+        ...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
       },
-      ...(inputData ? { body: new URLSearchParams({ input_data: JSON.stringify(inputData) }) } : {}),
+      ...(body ? { body } : {}),
     };
     const res = await fetch(this.apiBase + path, { ...init, signal: AbortSignal.timeout(this.cfg.sdpTimeoutMs) });
     const text = await res.text();
@@ -91,7 +97,7 @@ export class SdpClient {
       }
       if (!retried) {
         this.tokens.invalidate();
-        return this.call(method, path, inputData, true);
+        return this.call(method, path, inputData, true, form);
       }
     }
     if (!res.ok) {

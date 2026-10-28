@@ -39258,6 +39258,10 @@ var SdpClient = class {
   async put(path, inputData) {
     return this.call("PUT", path, inputData);
   }
+  /** DELETE with plain form fields (ServiceDesk takes `ids=...` on its relationship endpoints). */
+  async delete(path, form) {
+    return this.call("DELETE", path, void 0, false, form);
+  }
   /** Fetch every page of a list endpoint (up to `max` records). */
   async listAll(path, rootKey, max = 500, extra = {}) {
     const out = [];
@@ -39275,20 +39279,21 @@ var SdpClient = class {
     }
     return out.slice(0, max);
   }
-  async call(method, path, inputData, retried = false) {
+  async call(method, path, inputData, retried = false, form) {
     const [pathname, query] = path.split("?", 2);
     if (!/^\/[A-Za-z0-9_/]+$/.test(pathname) || pathname.includes("//") || query !== void 0 && !query.startsWith("input_data=")) {
       throw new SdpError(`Refused unsafe ServiceDesk path`, 400, { path: pathname.slice(0, 80) });
     }
     const token = await this.tokens.getAccessToken();
+    const body = inputData ? new URLSearchParams({ input_data: JSON.stringify(inputData) }) : form ? new URLSearchParams(form) : void 0;
     const init = {
       method,
       headers: {
         Accept: "application/vnd.manageengine.sdp.v3+json",
         Authorization: `Zoho-oauthtoken ${token}`,
-        ...inputData ? { "Content-Type": "application/x-www-form-urlencoded" } : {}
+        ...body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}
       },
-      ...inputData ? { body: new URLSearchParams({ input_data: JSON.stringify(inputData) }) } : {}
+      ...body ? { body } : {}
     };
     const res = await fetch(this.apiBase + path, { ...init, signal: AbortSignal.timeout(this.cfg.sdpTimeoutMs) });
     const text = await res.text();
@@ -39305,7 +39310,7 @@ var SdpClient = class {
       }
       if (!retried) {
         this.tokens.invalidate();
-        return this.call(method, path, inputData, true);
+        return this.call(method, path, inputData, true, form);
       }
     }
     if (!res.ok) {
@@ -39447,7 +39452,17 @@ function makeShapers(tz, streamField) {
       created_by: user(c.created_by),
       created: d(c.created_time),
       parent_id: c.parent_comment?.id ?? null
-    })
+    }),
+    worklog: (w) => ({
+      id: w.id,
+      owner: user(w.owner),
+      start: d(w.start_time),
+      end: d(w.end_time),
+      time_spent: w.time_spent ? { hours: Number(w.time_spent.hours ?? 0), minutes: Number(w.time_spent.minutes ?? 0) } : null,
+      worklog_type: w.worklog_type?.name ?? null,
+      description: w.description ?? null
+    }),
+    member: (m) => ({ member_id: m.id, role: m.role?.name, active: m.is_active, user: user(m.user) })
   };
 }
 function ok(data) {
@@ -39500,6 +39515,35 @@ var milestoneFields = {
   actual_start: dateStr.optional(),
   actual_end: dateStr.optional(),
   estimated_hours: external_exports.number().int().min(0).optional()
+};
+var projectFields = {
+  title: external_exports.string().optional(),
+  description: external_exports.string().optional(),
+  owner_email: external_exports.string().email().optional().describe("Project owner's email; resolved against project members"),
+  status: external_exports.string().optional().describe('Project status name, e.g. "Open", "In Progress", "Closed"'),
+  priority: external_exports.string().optional(),
+  project_type: external_exports.string().optional().describe("Project type name exactly as in ServiceDesk"),
+  project_code: external_exports.string().optional(),
+  scheduled_start: dateStr.optional(),
+  scheduled_end: dateStr.optional(),
+  actual_start: dateStr.optional(),
+  actual_end: dateStr.optional(),
+  projected_end: dateStr.optional(),
+  percentage_completion: external_exports.number().int().min(0).max(100).optional(),
+  estimated_hours: external_exports.number().int().min(0).optional(),
+  actual_hours: external_exports.number().int().min(0).optional(),
+  estimated_cost: external_exports.number().min(0).optional(),
+  actual_cost: external_exports.number().min(0).optional(),
+  udf_fields: external_exports.record(external_exports.string(), external_exports.union([external_exports.string(), external_exports.number()])).optional().describe('Project custom fields by API name, e.g. {"udf_char1": "..."}')
+};
+var worklogFields = {
+  description: external_exports.string().optional(),
+  start: dateStr.optional().describe("When the work started, YYYY-MM-DDTHH:mm in the server timezone"),
+  end: dateStr.optional().describe("When the work ended, YYYY-MM-DDTHH:mm in the server timezone"),
+  hours: external_exports.number().int().min(0).max(999).optional().describe("Time spent, hours part"),
+  minutes: external_exports.number().int().min(0).max(59).optional().describe("Time spent, minutes part"),
+  worklog_type: external_exports.string().optional().describe("Worklog type name exactly as in ServiceDesk"),
+  include_nonoperational_hours: external_exports.boolean().optional()
 };
 function registerTools(server, sdp, cfg) {
   const tz = cfg.timezone;
@@ -39623,7 +39667,7 @@ function registerTools(server, sdp, cfg) {
     async ({ project_id }) => {
       try {
         const list2 = await sdp.listAll(`/projects/${seg(project_id)}/project_members`, "project_members");
-        return ok(list2.map((m) => ({ member_id: m.id, role: m.role?.name, active: m.is_active, user: user(m.user) })));
+        return ok(list2.map(shape.member));
       } catch (e) {
         return fail(e);
       }
@@ -39650,19 +39694,20 @@ function registerTools(server, sdp, cfg) {
     "sdp_list_tasks",
     {
       title: "List tasks",
-      description: "List tasks of a project (includes milestone tasks), or only the tasks of one milestone. Use include_description=false for compact overviews.",
+      description: "List tasks of a project (includes milestone tasks), or only the tasks of one milestone. Use include_description=false for compact overviews, project_level_only=true for the tasks outside any milestone.",
       inputSchema: {
         project_id: idSchema,
         milestone_id: idSchema.optional(),
+        project_level_only: external_exports.boolean().default(false).describe("Only tasks that belong to no milestone"),
         include_description: external_exports.boolean().default(false),
         max: external_exports.number().int().min(1).max(1e3).default(500)
       },
       annotations: RO
     },
-    async ({ project_id, milestone_id, include_description, max }) => {
+    async ({ project_id, milestone_id, project_level_only, include_description, max }) => {
       try {
         const list2 = await sdp.listAll(taskPath(project_id, milestone_id), "tasks", max);
-        const shaped = list2.map(shape.task);
+        const shaped = list2.map(shape.task).filter((t) => !project_level_only || !t.milestone);
         return ok(include_description ? shaped : shaped.map(({ description, ...t }) => t));
       } catch (e) {
         return fail(e);
@@ -40058,6 +40103,333 @@ function registerTools(server, sdp, cfg) {
       }
     }
   );
+  server.registerTool(
+    "sdp_update_comment",
+    {
+      title: "Edit comment",
+      description: "Replace the text of an existing comment on a project, milestone, project task or milestone task (same targeting as sdp_add_comment). Comment ids come from sdp_list_comments.",
+      inputSchema: {
+        project_id: idSchema,
+        milestone_id: idSchema.optional(),
+        task_id: idSchema.optional(),
+        comment_id: idSchema,
+        comment: external_exports.string()
+      },
+      annotations: RW_UPDATE
+    },
+    async ({ project_id, milestone_id, task_id, comment_id, comment }) => {
+      try {
+        assertWritable(project_id);
+        const { path, root } = commentTarget(project_id, milestone_id, task_id);
+        const cpath = `${path}/${seg(comment_id)}`;
+        const current = (await sdp.get(cpath))[root] ?? {};
+        const res = await sdp.put(cpath, { [root]: { comment } });
+        sdp.audit({
+          op: "update_comment",
+          outcome: "ok",
+          project_id,
+          milestone_id: milestone_id ?? null,
+          task_id: task_id ?? null,
+          comment_id,
+          before: { comment: current.comment ?? null }
+        });
+        return ok(shape.comment(res[root] ?? {}));
+      } catch (e) {
+        return failWrite(sdp, "update_comment", { project_id, milestone_id, task_id }, e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_update_project",
+    {
+      title: "Update project",
+      description: "Update fields of the project itself (status, dates, owner, % complete, costs, ...). Only the fields you pass are changed.",
+      inputSchema: { project_id: idSchema, ...projectFields },
+      annotations: RW_UPDATE
+    },
+    async (a) => {
+      try {
+        assertWritable(a.project_id);
+        const b = {};
+        for (const k of ["title", "description", "project_code"]) if (a[k] !== void 0) b[k] = a[k];
+        if (a.owner_email) b.owner = await resolveOwner(a.project_id, a.owner_email);
+        if (a.status) b.status = { name: a.status };
+        if (a.priority) b.priority = { name: a.priority };
+        if (a.project_type) b.project_type = { name: a.project_type };
+        if (a.scheduled_start) b.scheduled_start_time = { value: toEpochMs(a.scheduled_start, tz, "start") };
+        if (a.scheduled_end) b.scheduled_end_time = { value: toEpochMs(a.scheduled_end, tz, "end") };
+        if (a.actual_start) b.actual_start_time = { value: toEpochMs(a.actual_start, tz, "start") };
+        if (a.actual_end) b.actual_end_time = { value: toEpochMs(a.actual_end, tz, "end") };
+        if (a.projected_end) b.projected_end = { value: toEpochMs(a.projected_end, tz, "end") };
+        for (const k of ["percentage_completion", "estimated_hours", "actual_hours", "estimated_cost", "actual_cost"]) {
+          if (a[k] !== void 0) b[k] = String(a[k]);
+        }
+        if (a.udf_fields && Object.keys(a.udf_fields).length) b.udf_fields = a.udf_fields;
+        if (!Object.keys(b).length) throw new Error("Nothing to update.");
+        const path = `/projects/${seg(a.project_id)}`;
+        const current = (await sdp.get(path)).project ?? {};
+        const res = await sdp.put(path, { project: b });
+        sdp.audit({ op: "update_project", outcome: "ok", project_id: a.project_id, fields: Object.keys(b), before: beforeImage(current, b) });
+        return ok(shape.project(res.project));
+      } catch (e) {
+        return failWrite(sdp, "update_project", a, e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_add_project_member",
+    {
+      title: "Add project member",
+      description: "Add a ServiceDesk user (technician) to a project, identified by user_email or user_id, with a project role. Needed before the user can own tasks, milestones or worklogs.",
+      inputSchema: {
+        project_id: idSchema,
+        user_email: external_exports.string().email().optional(),
+        user_id: idSchema.optional(),
+        role: external_exports.string().optional().describe('Project role name exactly as in ServiceDesk, e.g. "Team Member"')
+      },
+      annotations: RW
+    },
+    async ({ project_id, user_email, user_id, role }) => {
+      try {
+        assertWritable(project_id);
+        if (!user_email === !user_id) throw new Error("Pass exactly one of user_email or user_id.");
+        const body = { user: user_id ? { id: user_id } : { email_id: user_email }, is_active: true };
+        if (role) body.role = { name: role };
+        const res = await sdp.post(`/projects/${seg(project_id)}/project_members`, { project_member: body });
+        memberCache.delete(project_id);
+        const m = res.project_member ?? {};
+        sdp.audit({ op: "add_project_member", outcome: "ok", project_id, member_id: m.id, user: user_email ?? user_id, role: role ?? null });
+        return ok(shape.member(m));
+      } catch (e) {
+        return failWrite(sdp, "add_project_member", { project_id }, e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_update_project_member",
+    {
+      title: "Update project member",
+      description: "Change a project member's role, or deactivate / reactivate them (active=false keeps their history; nothing is deleted). member_id comes from sdp_list_project_members.",
+      inputSchema: {
+        project_id: idSchema,
+        member_id: idSchema,
+        role: external_exports.string().optional(),
+        active: external_exports.boolean().optional()
+      },
+      annotations: RW_UPDATE
+    },
+    async ({ project_id, member_id, role, active }) => {
+      try {
+        assertWritable(project_id);
+        const body = {};
+        if (role) body.role = { name: role };
+        if (active !== void 0) body.is_active = active;
+        if (!Object.keys(body).length) throw new Error("Nothing to update.");
+        const path = `/projects/${seg(project_id)}/project_members/${seg(member_id)}`;
+        const current = (await sdp.get(path)).project_member ?? {};
+        const res = await sdp.put(path, { project_member: body });
+        memberCache.delete(project_id);
+        sdp.audit({ op: "update_project_member", outcome: "ok", project_id, member_id, fields: Object.keys(body), before: beforeImage(current, body) });
+        return ok(shape.member(res.project_member));
+      } catch (e) {
+        return failWrite(sdp, "update_project_member", { project_id }, e);
+      }
+    }
+  );
+  const worklogPath = (projectId, taskId, milestoneId) => `${taskPath(projectId, milestoneId)}/${seg(taskId)}/worklogs`;
+  async function buildWorklogBody(projectId, a) {
+    const b = {};
+    if (a.owner_email) b.owner = await resolveOwner(projectId, a.owner_email);
+    if (a.description !== void 0) b.description = a.description;
+    if (a.start) b.start_time = { value: toEpochMs(a.start, tz, "start") };
+    if (a.end) b.end_time = { value: toEpochMs(a.end, tz, "end") };
+    if (b.start_time && b.end_time && Number(b.start_time.value) > Number(b.end_time.value)) throw new Error("Worklog start is after its end.");
+    if (a.hours !== void 0 || a.minutes !== void 0) b.time_spent = { hours: String(a.hours ?? 0), minutes: String(a.minutes ?? 0) };
+    if (a.worklog_type) b.worklog_type = { name: a.worklog_type };
+    if (a.include_nonoperational_hours !== void 0) b.include_nonoperational_hours = a.include_nonoperational_hours;
+    return b;
+  }
+  async function assertTaskInProject(projectId, taskId, milestoneId) {
+    const task = (await sdp.get(`${taskPath(projectId, milestoneId)}/${seg(taskId)}`)).task ?? {};
+    assertSameProject(task, projectId, `task ${taskId}`);
+  }
+  server.registerTool(
+    "sdp_list_worklogs",
+    {
+      title: "List worklogs",
+      description: "List the worklogs (time entries) of a project task or, with milestone_id, a milestone task.",
+      inputSchema: { project_id: idSchema, task_id: idSchema, milestone_id: idSchema.optional() },
+      annotations: RO
+    },
+    async ({ project_id, task_id, milestone_id }) => {
+      try {
+        const list2 = await sdp.listAll(worklogPath(project_id, task_id, milestone_id), "worklogs");
+        return ok(list2.map(shape.worklog));
+      } catch (e) {
+        return fail(e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_add_worklog",
+    {
+      title: "Add worklog",
+      description: "Log time on a project task or, with milestone_id, a milestone task. ServiceDesk requires worklogs before a task can be closed. Give the time spent (hours/minutes) and/or start and end; the owner must be a project member.",
+      inputSchema: {
+        project_id: idSchema,
+        task_id: idSchema,
+        milestone_id: idSchema.optional(),
+        owner_email: external_exports.string().email().describe("Who did the work; resolved against project members"),
+        ...worklogFields
+      },
+      annotations: RW
+    },
+    async (a) => {
+      try {
+        assertWritable(a.project_id);
+        const body = await buildWorklogBody(a.project_id, a);
+        if (!body.time_spent && !(body.start_time && body.end_time)) throw new Error("Give hours/minutes, or both start and end.");
+        await assertTaskInProject(a.project_id, a.task_id, a.milestone_id);
+        const res = await sdp.post(worklogPath(a.project_id, a.task_id, a.milestone_id), { worklog: body });
+        const w = res.worklog ?? {};
+        sdp.audit({
+          op: "add_worklog",
+          outcome: "ok",
+          project_id: a.project_id,
+          milestone_id: a.milestone_id ?? null,
+          task_id: a.task_id,
+          worklog_id: w.id,
+          fields: Object.keys(body)
+        });
+        return ok(shape.worklog(w));
+      } catch (e) {
+        return failWrite(sdp, "add_worklog", a, e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_update_worklog",
+    {
+      title: "Update worklog",
+      description: "Update an existing worklog of a project task or milestone task. Only the fields you pass are changed.",
+      inputSchema: {
+        project_id: idSchema,
+        task_id: idSchema,
+        milestone_id: idSchema.optional(),
+        worklog_id: idSchema,
+        owner_email: external_exports.string().email().optional(),
+        ...worklogFields
+      },
+      annotations: RW_UPDATE
+    },
+    async (a) => {
+      try {
+        assertWritable(a.project_id);
+        const body = await buildWorklogBody(a.project_id, a);
+        if (!Object.keys(body).length) throw new Error("Nothing to update.");
+        await assertTaskInProject(a.project_id, a.task_id, a.milestone_id);
+        const path = `${worklogPath(a.project_id, a.task_id, a.milestone_id)}/${seg(a.worklog_id)}`;
+        const current = (await sdp.get(path)).worklog ?? {};
+        const res = await sdp.put(path, { worklog: body });
+        sdp.audit({
+          op: "update_worklog",
+          outcome: "ok",
+          project_id: a.project_id,
+          task_id: a.task_id,
+          worklog_id: a.worklog_id,
+          fields: Object.keys(body),
+          before: beforeImage(current, body)
+        });
+        return ok(shape.worklog(res.worklog));
+      } catch (e) {
+        return failWrite(sdp, "update_worklog", a, e);
+      }
+    }
+  );
+  const idList = external_exports.array(idSchema).min(1).max(50);
+  const CHANGE_REL = {
+    caused_by_project: { path: "initiated_changes", key: "initiated_changes" },
+    initiated_project: { path: "initiated_by_change", key: "initiated_by_change" }
+  };
+  const changeRelation = external_exports.enum(["caused_by_project", "initiated_project"]).default("caused_by_project").describe("caused_by_project: changes the project causes; initiated_project: the change that started the project");
+  const RW_DETACH = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true };
+  server.registerTool(
+    "sdp_attach_requests",
+    {
+      title: "Attach requests",
+      description: "Link existing ServiceDesk requests (by request id) to a project.",
+      inputSchema: { project_id: idSchema, request_ids: idList },
+      annotations: RW
+    },
+    async ({ project_id, request_ids }) => {
+      try {
+        assertWritable(project_id);
+        await sdp.post(`/projects/${seg(project_id)}/_request_associations`, { requests: request_ids });
+        sdp.audit({ op: "attach_requests", outcome: "ok", project_id, request_ids });
+        return ok({ project_id, attached_requests: request_ids });
+      } catch (e) {
+        return failWrite(sdp, "attach_requests", { project_id }, e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_detach_requests",
+    {
+      title: "Detach requests",
+      description: "Remove the link between requests and a project. The requests themselves are not changed.",
+      inputSchema: { project_id: idSchema, request_ids: idList },
+      annotations: RW_DETACH
+    },
+    async ({ project_id, request_ids }) => {
+      try {
+        assertWritable(project_id);
+        await sdp.delete(`/projects/${seg(project_id)}/_request_associations`, { ids: request_ids.join(",") });
+        sdp.audit({ op: "detach_requests", outcome: "ok", project_id, request_ids });
+        return ok({ project_id, detached_requests: request_ids });
+      } catch (e) {
+        return failWrite(sdp, "detach_requests", { project_id }, e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_attach_changes",
+    {
+      title: "Attach changes",
+      description: "Link existing changes (by change id) to a project, as changes caused by the project or as the change that initiated it.",
+      inputSchema: { project_id: idSchema, change_ids: idList, relation: changeRelation },
+      annotations: RW
+    },
+    async ({ project_id, change_ids, relation }) => {
+      try {
+        assertWritable(project_id);
+        const rel = CHANGE_REL[relation];
+        await sdp.post(`/projects/${seg(project_id)}/rel/${rel.path}`, { [rel.key]: change_ids.map((id) => ({ change: { id } })) });
+        sdp.audit({ op: "attach_changes", outcome: "ok", project_id, relation, change_ids });
+        return ok({ project_id, relation, attached_changes: change_ids });
+      } catch (e) {
+        return failWrite(sdp, "attach_changes", { project_id }, e);
+      }
+    }
+  );
+  server.registerTool(
+    "sdp_detach_changes",
+    {
+      title: "Detach changes",
+      description: "Remove the link between changes and a project. The changes themselves are not changed.",
+      inputSchema: { project_id: idSchema, change_ids: idList, relation: changeRelation },
+      annotations: RW_DETACH
+    },
+    async ({ project_id, change_ids, relation }) => {
+      try {
+        assertWritable(project_id);
+        await sdp.delete(`/projects/${seg(project_id)}/rel/${CHANGE_REL[relation].path}`, { ids: change_ids.join(",") });
+        sdp.audit({ op: "detach_changes", outcome: "ok", project_id, relation, change_ids });
+        return ok({ project_id, relation, detached_changes: change_ids });
+      } catch (e) {
+        return failWrite(sdp, "detach_changes", { project_id }, e);
+      }
+    }
+  );
 }
 function commentTarget(projectId, milestoneId, taskId) {
   if (taskId && milestoneId)
@@ -40069,11 +40441,12 @@ function commentTarget(projectId, milestoneId, taskId) {
 
 // src/server.ts
 var VERSION = "0.5.3";
-var INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members and comments; create and update milestones, tasks and comments (no deletes).
+var INSTRUCTIONS = `ServiceDesk Plus Cloud projects: read projects, milestones, tasks, members, comments and worklogs; update the project; create and update milestones, tasks, comments, worklogs and project members; attach and detach requests and changes (no deletes of records).
 - Changes are made as the signed-in user and limited by that user's ServiceDesk permissions; the server may further restrict writes to configured projects.
-- Dates are YYYY-MM-DD in the configured timezone (SDP_TIMEZONE, default UTC).
+- Dates are YYYY-MM-DD in the configured timezone (SDP_TIMEZONE, default UTC); worklog start/end take YYYY-MM-DDTHH:mm.
 - Before bulk changes, run sdp_bulk_create_tasks with dry_run=true and show the plan to the user.
-- Task and milestone owners must be project members.`;
+- Task, milestone and worklog owners must be project members (sdp_add_project_member adds them).
+- ServiceDesk requires worklogs on a task before it can be closed: log time with sdp_add_worklog first.`;
 function buildServer(cfg, tokens, user2, onTokenRejected) {
   const sdp = new SdpClient(cfg, tokens, user2, onTokenRejected);
   const server = new McpServer({ name: "servicedesk-projects", version: VERSION }, { instructions: INSTRUCTIONS });

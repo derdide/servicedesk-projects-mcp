@@ -25,11 +25,18 @@ Two ways to run it:
 | `sdp_create_task`, `sdp_update_task` | write | Update can also post a comment explaining the change |
 | `sdp_bulk_create_tasks` | write | A whole work breakdown in one call, **dry run by default**, with dependencies between the new tasks |
 | `sdp_add_dependency` | write | Successor starts after predecessor |
-| `sdp_add_comment` | write | Status notes, decisions |
+| `sdp_add_comment`, `sdp_update_comment` | write | Status notes, decisions — on the project, a milestone, a project task or a milestone task |
+| `sdp_update_project` | write | The project itself: status, dates, owner, % complete, hours, costs, custom fields |
+| `sdp_add_project_member`, `sdp_update_project_member` | write | Add a technician with a role; change role or deactivate (no removal) |
+| `sdp_list_worklogs`, `sdp_add_worklog`, `sdp_update_worklog` | read / write | Time spent on project and milestone tasks — ServiceDesk requires worklogs before a task can be closed |
+| `sdp_attach_requests`, `sdp_detach_requests` | write | Link requests to the project, or remove the link |
+| `sdp_attach_changes`, `sdp_detach_changes` | write | Link changes caused by the project (or the change that initiated it), or remove the link |
+
+Project-level tasks (outside any milestone): `sdp_create_task` without `milestone_id`, and `sdp_list_tasks` with `project_level_only=true`.
 
 ### Guard-rails
 
-- **No delete.** Not implemented, and the OAuth scopes below do not include it.
+- **No delete of records.** Not implemented, and the OAuth scopes below do not include it. The *detach* tools only remove the link between a project and a request or change; they use HTTP `DELETE` and may therefore need the `SDPOnDemand.projects.DELETE` scope, which is not requested by default (see *Status and known limits*).
 - **Write allow-list.** Create/update only on the project ids in `SDP_WRITE_PROJECT_IDS`; every other project is read-only. Empty = the whole server is read-only.
 - **Dry run first.** `sdp_bulk_create_tasks` validates milestones, owners, dates and dependencies and returns the plan without creating anything unless `dry_run=false`.
 - **Attribution.** Changes appear in ServiceDesk under the account whose token the server uses — a real person, not a generic account.
@@ -173,6 +180,8 @@ The `.env` file is looked up next to `server.mjs` and one folder above it. Real 
 Tested against a live ServiceDesk Plus Cloud instance (EU data centre, custom domain): reading projects, milestones, tasks and members; creating and updating tasks under a milestone and at project level; owner resolution by email; a custom field exposed as `stream`; comments; task dependencies (creating and listing); token refresh.
 
 Note on dependencies: ServiceDesk Plus Cloud documents dependencies for request tasks only. The project-task endpoint used here (`/projects/{id}/task_dependencies`, `parent_task` / `child_task`) follows the same pattern and works, but is not in the official API reference, so it could change without notice.
+
+Added in 0.6.0 and covered by mocks only so far (built from the official API reference, not yet run against a live instance): project update, project members, worklogs, comment edits, attaching and detaching requests and changes. Points to verify live: adding a member by e-mail (`user.email_id`; use `user_id` if refused); detaching requests (the reference does not show how the ids are passed — the server sends `ids=<id>,<id>` as for changes); and whether detaching needs the `SDPOnDemand.projects.DELETE` scope — adding that scope would also let the token delete projects, tasks and worklogs outside this server, so weigh it before adding it to `ZOHO_SCOPES` / the Self Client. Attaching requests or changes may also need read scopes on those modules.
 
 Other limits: no delete (by design); **one time zone for everyone** — dates given as `YYYY-MM-DD` (or without offset) are read in `SDP_TIMEZONE`, so a user in another time zone may see a deadline land a few hours off, at worst on the neighbouring day near midnight; creating a task with a milestone or task id is not cross-checked against the project (ServiceDesk permissions still apply); a task cannot be moved between milestones through the API; a bulk creation interrupted by a disconnect stops cleanly but is not resumed — the result lists what was created, and re-running it creates the remaining tasks again *and* duplicates of the created ones, so check before re-running. The multi-user mode keeps its token cache and rate limits in memory: run **one replica**, or put a gateway in front for more.
 
